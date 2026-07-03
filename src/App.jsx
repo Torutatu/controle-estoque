@@ -7,7 +7,8 @@ import {
   Package, TrendingUp, AlertTriangle, Plus, Trash2, Edit2,
   X, Search, LayoutGrid, ClipboardList, FileBarChart,
   ArrowUpCircle, ArrowDownCircle, Boxes, MapPin, ShoppingCart, Wand2,
-  Copy, Download, Check, FileText, Upload, FileSpreadsheet, AlertCircle
+  Copy, Download, Check, FileText, Upload, FileSpreadsheet, AlertCircle,
+  ArrowLeftRight,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { storage, readLegacyLocalStorage } from "./storage";
@@ -351,6 +352,69 @@ export default function ControleEstoque() {
     setMoveModal(null);
   }
 
+  // Transfere estoque de um produto de uma filial pra outra: dá baixa no
+  // produto de origem, soma no produto correspondente (mesmo SKU) na filial
+  // de destino — criando esse produto no destino se ainda não existir — e
+  // registra uma saída + uma entrada vinculadas (mesmo transferId).
+  function transferStock({ fromCity, toCity, product, quantity }) {
+    const now = new Date().toISOString();
+    const transferId = uid();
+
+    const existingDest = products.find((p) => p.city === toCity && p.sku === product.sku);
+    const destId = existingDest ? existingDest.id : uid();
+
+    let nextProducts = products.map((p) => {
+      if (p.id === product.id) {
+        return { ...p, quantity: Math.max(0, p.quantity - quantity) };
+      }
+      if (existingDest && p.id === existingDest.id) {
+        return { ...p, quantity: p.quantity + quantity };
+      }
+      return p;
+    });
+
+    if (!existingDest) {
+      nextProducts = [
+        {
+          id: destId,
+          name: product.name,
+          sku: product.sku,
+          category: product.category,
+          unit: product.unit,
+          quantity,
+          minStock: product.minStock,
+          unitPrice: product.unitPrice,
+          city: toCity,
+          orderQty: 0,
+        },
+        ...nextProducts,
+      ];
+    }
+
+    const outMovement = {
+      id: uid(),
+      type: "saida",
+      productId: product.id,
+      quantity,
+      note: `Transferência para ${toCity}`,
+      city: fromCity,
+      date: now,
+      transferId,
+    };
+    const inMovement = {
+      id: uid(),
+      type: "entrada",
+      productId: destId,
+      quantity,
+      note: `Transferência de ${fromCity}`,
+      city: toCity,
+      date: now,
+      transferId,
+    };
+
+    persist(nextProducts, [inMovement, outMovement, ...movements]);
+  }
+
   // rows: [{ productId?, newProduct?, quantity, note }]
   // Se productId existir, soma a quantidade a um produto já cadastrado.
   // Se newProduct existir, cria o produto antes de dar entrada.
@@ -539,6 +603,7 @@ export default function ControleEstoque() {
           { key: "produtos", label: "Produtos", icon: Package, color: TOKENS.amber },
           { key: "movimentacoes", label: "Movimentações", icon: ClipboardList, color: TOKENS.rust },
           { key: "pedidos", label: "Pedidos", icon: ShoppingCart, color: TOKENS.inkLight },
+          { key: "transferencias", label: "Transferência", icon: ArrowLeftRight, color: TOKENS.rustDark },
           { key: "relatorios", label: "Relatórios", icon: FileBarChart, color: TOKENS.purple },
         ].map((t) => {
           const Icon = t.icon;
@@ -572,6 +637,8 @@ export default function ControleEstoque() {
       <div style={{ background: "#fff", border: `1px solid ${TOKENS.line}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 24, minHeight: 480 }}>
         {tab === "pedidos" ? (
           <PedidosTab products={products} city={city} onSave={updateOrderQuantities} onRequestPrint={setPrintTarget} />
+        ) : tab === "transferencias" ? (
+          <TransferenciasTab products={products} movements={movements} onTransfer={transferStock} />
         ) : cityProducts.length === 0 ? (
           <EmptyCity city={city} onAdd={() => setProductModal("new")} />
         ) : (
@@ -897,6 +964,173 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
                           onChange={(e) => setQty(p.id, e.target.value === "" ? 0 : Number(e.target.value))}
                         />
                       </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TransferenciasTab({ products, movements, onTransfer }) {
+  const [fromCity, setFromCity] = useState(CITIES[0]);
+  const [toCity, setToCity] = useState(CITIES.find((c) => c !== CITIES[0]) || CITIES[0]);
+  const [productId, setProductId] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const fromProducts = products
+    .filter((p) => p.city === fromCity)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const selectedProduct = fromProducts.find((p) => p.id === productId) || null;
+  const toOptions = CITIES.filter((c) => c !== fromCity);
+
+  function handleFromCity(c) {
+    setFromCity(c);
+    setProductId("");
+    setError("");
+    setSuccess("");
+    if (toCity === c) {
+      setToCity(CITIES.find((x) => x !== c) || c);
+    }
+  }
+
+  function handleToCity(c) {
+    setToCity(c);
+    setError("");
+    setSuccess("");
+  }
+
+  function submit(e) {
+    e.preventDefault();
+    setError("");
+    setSuccess("");
+
+    if (fromCity === toCity) {
+      setError("Escolha duas filiais diferentes.");
+      return;
+    }
+    if (!selectedProduct) {
+      setError("Escolha um produto.");
+      return;
+    }
+    const qty = Number(quantity);
+    if (!qty || qty <= 0) {
+      setError("Informe uma quantidade válida.");
+      return;
+    }
+    if (qty > selectedProduct.quantity) {
+      setError(`Quantidade maior que o estoque disponível (${selectedProduct.quantity} ${selectedProduct.unit}).`);
+      return;
+    }
+
+    onTransfer({ fromCity, toCity, product: selectedProduct, quantity: qty });
+    setSuccess(`${qty} ${selectedProduct.unit} de "${selectedProduct.name}" transferido(s) de ${fromCity} para ${toCity}.`);
+    setProductId("");
+    setQuantity("");
+  }
+
+  const recentTransfers = movements
+    .filter((m) => m.transferId && m.type === "saida")
+    .slice(0, 15);
+
+  return (
+    <div>
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16 }}>Transferência entre filiais</div>
+        <p style={{ fontSize: 12, color: TOKENS.inkLight, margin: "4px 0 0" }}>
+          Escolha de onde e pra onde vai o material — a quantidade sai do estoque de origem e entra no de destino.
+        </p>
+      </div>
+
+      <form onSubmit={submit} className="est-card" style={{ padding: 16, marginBottom: 20, display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+          <Field label="De (origem)" style={{ flex: "1 1 160px" }}>
+            <select className="est-input" style={{ width: "100%" }} value={fromCity} onChange={(e) => handleFromCity(e.target.value)}>
+              {CITIES.map((c) => <option key={c}>{c}</option>)}
+            </select>
+          </Field>
+          <div style={{ display: "flex", alignItems: "flex-end", paddingBottom: 8, color: TOKENS.inkLight }}>
+            <ArrowLeftRight size={16} />
+          </div>
+          <Field label="Para (destino)" style={{ flex: "1 1 160px" }}>
+            <select className="est-input" style={{ width: "100%" }} value={toCity} onChange={(e) => handleToCity(e.target.value)}>
+              {toOptions.map((c) => <option key={c}>{c}</option>)}
+            </select>
+          </Field>
+        </div>
+
+        {fromProducts.length === 0 ? (
+          <p style={{ fontSize: 12, color: TOKENS.inkLight }}>Sem produtos cadastrados em {fromCity}.</p>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+            <Field label="Material" style={{ flex: "2 1 260px" }}>
+              <select
+                className="est-input"
+                style={{ width: "100%" }}
+                value={productId}
+                onChange={(e) => { setProductId(e.target.value); setError(""); setSuccess(""); }}
+              >
+                <option value="">Selecione…</option>
+                {fromProducts.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} — {p.quantity} {p.unit} em estoque
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Quantidade" style={{ flex: "1 1 120px" }}>
+              <input
+                className="est-input"
+                type="number"
+                min="0"
+                max={selectedProduct ? selectedProduct.quantity : undefined}
+                style={{ width: "100%" }}
+                value={quantity}
+                onChange={(e) => { setQuantity(e.target.value); setError(""); setSuccess(""); }}
+                placeholder={selectedProduct ? `até ${selectedProduct.quantity} ${selectedProduct.unit}` : ""}
+              />
+            </Field>
+          </div>
+        )}
+
+        {error && <div style={{ fontSize: 12, color: TOKENS.rustDark }}>{error}</div>}
+        {success && <div style={{ fontSize: 12, color: TOKENS.tealDark }}>{success}</div>}
+
+        <div>
+          <button type="submit" className="est-btn" style={{ background: TOKENS.ink, color: "#fff" }} disabled={fromProducts.length === 0}>
+            <ArrowLeftRight size={14} /> Transferir
+          </button>
+        </div>
+      </form>
+
+      <div className="est-card" style={{ padding: 16 }}>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 14, marginBottom: 12 }}>
+          Transferências recentes
+        </div>
+        {recentTransfers.length === 0 ? (
+          <p style={{ fontSize: 12, color: TOKENS.inkLight }}>Nenhuma transferência registrada ainda.</p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table className="est-table">
+              <thead>
+                <tr><th>Data</th><th>De</th><th>Para</th><th>Qtd.</th></tr>
+              </thead>
+              <tbody>
+                {recentTransfers.map((m) => {
+                  const product = products.find((p) => p.id === m.productId);
+                  const toMovement = movements.find((x) => x.transferId === m.transferId && x.type === "entrada");
+                  return (
+                    <tr key={m.id}>
+                      <td className="est-mono" style={{ color: TOKENS.inkLight }}>{fmtDate(m.date)}</td>
+                      <td>{m.city}</td>
+                      <td>{toMovement ? toMovement.city : "—"}</td>
+                      <td className="est-mono">{m.quantity} {product ? product.unit : ""} · {product ? product.name : "produto removido"}</td>
                     </tr>
                   );
                 })}
