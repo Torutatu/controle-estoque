@@ -21,6 +21,7 @@ Todas as alterações relevantes do projeto **Controle de Estoque** são documen
 ### Corrigido
 - Validação de SKU que impedia salvar um produto com um SKU legitimamente reaproveitado em outra filial (ex: editar "Chá" em Palotina).
 - Migração automática que realinha SKU, unidade e setor dos produtos de todas as filiais com o catálogo de Toledo (usado como fonte de verdade).
+- PDF do pedido agora agrupa os itens por Setor (na ordem Tanato, Cozinha, Limpeza, Funerária), em vez de seguir a ordem interna dos produtos (que aparentava alfabética e ignorava qualquer organização por setor).
 
 ## [2026-07-03]
 

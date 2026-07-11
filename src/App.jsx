@@ -47,6 +47,7 @@ const CHANGELOG = [
     fixed: [
       "Validação de SKU que impedia salvar um produto com SKU legitimamente reaproveitado em outra filial.",
       "Migração automática que realinha SKU, unidade e setor dos produtos de todas as filiais com o catálogo de Toledo.",
+      "PDF do pedido agora agrupa os itens por Setor, em vez de seguir a ordem interna dos produtos.",
     ],
   },
 ];
@@ -1185,6 +1186,7 @@ function PrintSheet({ products, target }) {
         .ps-table thead { display: table-header-group; }
         .ps-table tr { break-inside: avoid; }
         .ps-city-heading { break-after: avoid; break-inside: avoid; }
+        .ps-category-heading { break-after: avoid; break-inside: avoid; }
       `}</style>
 
       <div style={{ display: "flex", alignItems: "center", gap: 16, borderBottom: "2px solid #1a1a1a", paddingBottom: 16, marginBottom: 20 }}>
@@ -1203,29 +1205,46 @@ function PrintSheet({ products, target }) {
       {cities.map((c) => {
         const items = products.filter((p) => p.city === c && (Number(p.orderQty) || 0) > 0 && (p.orderSource || "matriz") === source);
         const total = items.reduce((s, p) => s + (Number(p.orderQty) || 0), 0);
+        // Agrupa por setor (na ordem fixa de CATEGORIES) e ordena por nome
+        // dentro de cada setor — facilita separar os itens fisicamente.
+        const groups = CATEGORIES.map((cat) => ({
+          category: cat,
+          items: items.filter((p) => p.category === cat).sort((a, b) => a.name.localeCompare(b.name, "pt-BR")),
+        })).filter((g) => g.items.length > 0);
+        const otherItems = items
+          .filter((p) => !CATEGORIES.includes(p.category))
+          .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+        if (otherItems.length > 0) groups.push({ category: "Outros", items: otherItems });
+
         return (
           <div key={c} style={{ marginBottom: 24 }}>
             <div className="ps-city-heading" style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 14, marginBottom: 6 }}>{c}</div>
             {items.length === 0 ? (
               <p style={{ fontSize: 12, color: "#777", marginBottom: 8 }}>Nenhum item com quantidade a pedir definida para esta filial.</p>
             ) : (
-              <table className="ps-table">
-                <thead>
-                  <tr><th>SKU</th><th>Produto</th><th>Setor</th><th style={{ textAlign: "right" }}>Qtd.</th><th>Un.</th><th>Equivalente</th></tr>
-                </thead>
-                <tbody>
-                  {items.map((p) => (
-                    <tr key={p.id}>
-                      <td>{p.sku}</td>
-                      <td>{p.name}</td>
-                      <td>{p.category}</td>
-                      <td style={{ textAlign: "right" }}>{p.orderPackageUnit ? p.orderPackageQty : p.orderQty}</td>
-                      <td>{p.orderPackageUnit || p.unit}</td>
-                      <td>{p.orderPackageUnit ? `${p.orderQty} ${p.unit}` : "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              groups.map((g) => (
+                <div key={g.category} style={{ marginBottom: 10 }}>
+                  <div className="ps-category-heading" style={{ fontSize: 11, fontWeight: 700, color: "#555", textTransform: "uppercase", letterSpacing: "0.04em", margin: "8px 0 4px" }}>
+                    {g.category}
+                  </div>
+                  <table className="ps-table">
+                    <thead>
+                      <tr><th>SKU</th><th>Produto</th><th style={{ textAlign: "right" }}>Qtd.</th><th>Un.</th><th>Equivalente</th></tr>
+                    </thead>
+                    <tbody>
+                      {g.items.map((p) => (
+                        <tr key={p.id}>
+                          <td>{p.sku}</td>
+                          <td>{p.name}</td>
+                          <td style={{ textAlign: "right" }}>{p.orderPackageUnit ? p.orderPackageQty : p.orderQty}</td>
+                          <td>{p.orderPackageUnit || p.unit}</td>
+                          <td>{p.orderPackageUnit ? `${p.orderQty} ${p.unit}` : "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))
             )}
             {items.length > 0 && (
               <div style={{ fontSize: 12, textAlign: "right", color: "#333" }}>
