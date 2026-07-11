@@ -8,7 +8,7 @@ import {
   X, Search, LayoutGrid, ClipboardList, FileBarChart,
   ArrowUpCircle, ArrowDownCircle, Boxes, MapPin, ShoppingCart, Wand2,
   Copy, Download, Check, FileText, Upload, FileSpreadsheet, AlertCircle,
-  ArrowLeftRight, ChevronUp, ChevronDown, ChevronsUpDown,
+  ArrowLeftRight, ChevronUp, ChevronDown, ChevronsUpDown, Divide, Sparkles,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { storage, readLegacyLocalStorage } from "./storage";
@@ -23,6 +23,27 @@ const LOGO_PRINT = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAARUAAAEECAYAAA
 const CITIES = ["Toledo", "Assis", "Palotina", "Cafelândia", "Corbélia"];
 const CATEGORIES = ["Tanato", "Cozinha", "Limpeza", "Funerária"];
 const UNITS = ["UN", "CX", "PCT", "FARDO"];
+
+// Alimenta o modal "Novidades" (botão no cabeçalho). Mantenha em sincronia
+// com o CHANGELOG.md sempre que uma nova versão for publicada — entrada mais
+// recente primeiro.
+const CHANGELOG = [
+  {
+    date: "11/07/2026",
+    added: [
+      "Conversão de unidades (UN/CX/PCT/FARDO) nas telas de Movimentações, Transferência e Pedidos — informe a quantidade em caixa/fardo/pacote e o sistema converte automaticamente para a unidade real do produto, mostrando o total convertido.",
+      "Botão de conversão de produto para UN (ícone ÷ na aba Produtos), recalculando estoque, mínimo, preço unitário e quantidade a pedir em todas as filiais de uma vez.",
+      "Ordenação clicável nas colunas da tabela de Produtos.",
+      "Botões de editar e apagar em cada movimentação, com ajuste automático do estoque.",
+      "Sugestão automática de SKU por setor ao cadastrar um produto novo.",
+      "Aviso de SKUs duplicados na aba Produtos.",
+    ],
+    fixed: [
+      "Validação de SKU que impedia salvar um produto com SKU legitimamente reaproveitado em outra filial.",
+      "Migração automática que realinha SKU, unidade e setor dos produtos de todas as filiais com o catálogo de Toledo.",
+    ],
+  },
+];
 
 const CAT_STYLE = {
   "Tanato": { color: TOKENS.rust, dark: TOKENS.rustDark },
@@ -323,6 +344,33 @@ function resolveSkuConflicts(products) {
   return products.map((p) => (renames[p.id] ? { ...p, sku: renames[p.id] } : p));
 }
 
+// Alinha SKU, unidade e setor dos produtos das outras filiais com o produto
+// de mesmo nome em Toledo (fonte da verdade do catálogo). Corrige tanto
+// divergências antigas (ex.: "Chá" virou CX em Toledo e UN em Palotina) como
+// SKUs que tiveram que ser trocados manualmente por causa de uma validação
+// antiga bugada. Quantidade, mínimo, preço e pedido de cada filial não são
+// mexidos — só os campos "de catálogo".
+function alignCatalogWithToledo(products) {
+  const toledoByName = {};
+  products.forEach((p) => {
+    if (p.city === "Toledo") {
+      toledoByName[p.name.trim().toLowerCase()] = p;
+    }
+  });
+
+  let changed = false;
+  const next = products.map((p) => {
+    if (p.city === "Toledo") return p;
+    const ref = toledoByName[p.name.trim().toLowerCase()];
+    if (!ref) return p;
+    if (p.sku === ref.sku && p.unit === ref.unit && p.category === ref.category) return p;
+    changed = true;
+    return { ...p, sku: ref.sku, unit: ref.unit, category: ref.category };
+  });
+
+  return changed ? next : products;
+}
+
 export default function ControleEstoque() {
   const [products, setProducts] = useState(null);
   const [movements, setMovements] = useState(null);
@@ -337,7 +385,9 @@ export default function ControleEstoque() {
   const [confirmDeleteMovement, setConfirmDeleteMovement] = useState(null);
   const [importModal, setImportModal] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [convertModal, setConvertModal] = useState(null);
   const [printTarget, setPrintTarget] = useState(null); // null | cityName | 'all'
+  const [showChangelog, setShowChangelog] = useState(false);
 
   useEffect(() => {
     if (!printTarget) return;
@@ -436,21 +486,39 @@ export default function ControleEstoque() {
             migrated = resolveSkuConflicts(migrated);
             needsSave = true;
           }
+          // Alinha SKU, unidade e setor dos produtos das outras filiais com
+          // o correspondente em Toledo (por nome) — uma única vez.
+          if (!parsed.catalogAligned) {
+            migrated = alignCatalogWithToledo(migrated);
+            needsSave = true;
+          }
           setProducts(migrated);
           setMovements(movs);
           if (needsSave) {
             await storage.set(
               "estoque-data-v2",
-              JSON.stringify({ products: migrated, movements: movs, catalogReplicated: true, skuConflictsResolved: true })
+              JSON.stringify({
+                products: migrated,
+                movements: movs,
+                catalogReplicated: true,
+                skuConflictsResolved: true,
+                catalogAligned: true,
+              })
             );
           }
         } else {
-          const seeded = replicateCatalogToOtherCities(buildSeedProducts());
+          const seeded = alignCatalogWithToledo(replicateCatalogToOtherCities(buildSeedProducts()));
           setProducts(seeded);
           setMovements([]);
           await storage.set(
             "estoque-data-v2",
-            JSON.stringify({ products: seeded, movements: [], catalogReplicated: true, skuConflictsResolved: true })
+            JSON.stringify({
+              products: seeded,
+              movements: [],
+              catalogReplicated: true,
+              skuConflictsResolved: true,
+              catalogAligned: true,
+            })
           );
         }
       } catch (e) {
@@ -467,7 +535,13 @@ export default function ControleEstoque() {
     try {
       await storage.set(
         "estoque-data-v2",
-        JSON.stringify({ products: nextProducts, movements: nextMovements, catalogReplicated: true, skuConflictsResolved: true })
+        JSON.stringify({
+          products: nextProducts,
+          movements: nextMovements,
+          catalogReplicated: true,
+          skuConflictsResolved: true,
+          catalogAligned: true,
+        })
       );
     } catch (e) {
       console.error("Falha ao salvar", e);
@@ -487,6 +561,29 @@ export default function ControleEstoque() {
   function deleteProduct(id) {
     persist(products.filter((p) => p.id !== id), movements.filter((m) => m.productId !== id));
     setConfirmDelete(null);
+  }
+
+  // Converte um item (identificado pelo nome) de uma unidade "embalada"
+  // (CX/PCT/FARDO) para UN em TODAS as filiais de uma vez, usando o fator
+  // informado (quantas unidades individuais tem em cada embalagem). Estoque,
+  // mínimo, preço unitário e quantidade a pedir são recalculados; o SKU não
+  // muda. Sem isso, cada filial poderia acabar com uma unidade diferente
+  // pro mesmo item.
+  function convertProductUnit(productName, factor) {
+    const key = productName.trim().toLowerCase();
+    const nextProducts = products.map((p) => {
+      if (p.name.trim().toLowerCase() !== key) return p;
+      return {
+        ...p,
+        unit: "UN",
+        quantity: Math.round(p.quantity * factor),
+        minStock: Math.round(p.minStock * factor),
+        unitPrice: factor > 0 ? Math.round((p.unitPrice / factor) * 100) / 100 : p.unitPrice,
+        orderQty: Math.round((Number(p.orderQty) || 0) * factor),
+      };
+    });
+    persist(nextProducts, movements);
+    setConvertModal(null);
   }
 
   function addMovement(mv) {
@@ -511,7 +608,7 @@ export default function ControleEstoque() {
   // reaproveitado manualmente em outro item), então qualquer divergência
   // faz o app criar um produto novo no destino em vez de arriscar somar
   // estoque num item errado.
-  function transferStock({ fromCity, toCity, product, quantity }) {
+  function transferStock({ fromCity, toCity, product, quantity, packageInfo }) {
     const now = new Date().toISOString();
     const transferId = uid();
 
@@ -560,6 +657,7 @@ export default function ControleEstoque() {
       city: fromCity,
       date: now,
       transferId,
+      ...(packageInfo || {}),
     };
     const inMovement = {
       id: uid(),
@@ -570,6 +668,7 @@ export default function ControleEstoque() {
       city: toCity,
       date: now,
       transferId,
+      ...(packageInfo || {}),
     };
 
     persist(nextProducts, [inMovement, outMovement, ...movements]);
@@ -687,10 +786,19 @@ export default function ControleEstoque() {
   }
 
   function updateOrderQuantities(updates) {
-    // updates: { [productId]: orderQty }
-    const nextProducts = products.map((p) =>
-      updates.hasOwnProperty(p.id) ? { ...p, orderQty: updates[p.id] } : p
-    );
+    // updates: { [productId]: { qty, unit, packageQty, factor } }
+    const nextProducts = products.map((p) => {
+      if (!updates.hasOwnProperty(p.id)) return p;
+      const d = updates[p.id];
+      const isPackaged = d.unit && d.unit !== p.unit;
+      return {
+        ...p,
+        orderQty: d.qty,
+        orderPackageUnit: isPackaged ? d.unit : null,
+        orderPackageQty: isPackaged ? Number(d.packageQty) || 0 : null,
+        orderUnitsPerPackage: isPackaged ? Number(d.factor) || 0 : null,
+      };
+    });
     persist(nextProducts, movements);
   }
 
@@ -805,6 +913,15 @@ export default function ControleEstoque() {
             <div className="est-mono" style={{ fontSize: 11, color: "#B9C4CE", background: "#ffffff14", padding: "6px 12px", borderRadius: 6 }}>
               {new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" })}
             </div>
+            <button
+              type="button"
+              onClick={() => setShowChangelog(true)}
+              title="Novidades"
+              className="est-mono"
+              style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#B9C4CE", background: "#ffffff14", border: "none", borderRadius: 6, padding: "6px 10px", cursor: "pointer" }}
+            >
+              <Sparkles size={12} /> Novidades
+            </button>
             <LogoutButton />
           </div>
         </div>
@@ -894,6 +1011,7 @@ export default function ControleEstoque() {
                 onNew={() => setProductModal("new")}
                 onEdit={(p) => setProductModal(p)}
                 onDelete={(p) => setConfirmDelete(p)}
+                onConvert={(p) => setConvertModal(p)}
               />
             )}
 
@@ -950,6 +1068,15 @@ export default function ControleEstoque() {
         />
       )}
 
+      {convertModal && (
+        <ConvertUnitModal
+          product={convertModal}
+          allProducts={products}
+          onConvert={convertProductUnit}
+          onClose={() => setConvertModal(null)}
+        />
+      )}
+
       {confirmDeleteMovement && (
         <div className="est-modal-overlay" onClick={() => setConfirmDeleteMovement(null)}>
           <div className="est-modal" onClick={(e) => e.stopPropagation()}>
@@ -994,6 +1121,8 @@ export default function ControleEstoque() {
           </div>
         </div>
       )}
+
+      {showChangelog && <ChangelogModal onClose={() => setShowChangelog(false)} />}
     </div>
 
     <PrintSheet products={products} target={printTarget} />
@@ -1039,7 +1168,7 @@ function PrintSheet({ products, target }) {
             ) : (
               <table className="ps-table">
                 <thead>
-                  <tr><th>SKU</th><th>Produto</th><th>Setor</th><th style={{ textAlign: "right" }}>Qtd.</th><th>Un.</th></tr>
+                  <tr><th>SKU</th><th>Produto</th><th>Setor</th><th style={{ textAlign: "right" }}>Qtd.</th><th>Un.</th><th>Equivalente</th></tr>
                 </thead>
                 <tbody>
                   {items.map((p) => (
@@ -1047,8 +1176,9 @@ function PrintSheet({ products, target }) {
                       <td>{p.sku}</td>
                       <td>{p.name}</td>
                       <td>{p.category}</td>
-                      <td style={{ textAlign: "right" }}>{p.orderQty}</td>
-                      <td>{p.unit}</td>
+                      <td style={{ textAlign: "right" }}>{p.orderPackageUnit ? p.orderPackageQty : p.orderQty}</td>
+                      <td>{p.orderPackageUnit || p.unit}</td>
+                      <td>{p.orderPackageUnit ? `${p.orderQty} ${p.unit}` : "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1075,16 +1205,21 @@ function suggestedQty(p) {
 }
 
 function buildOrderText(cityName, cityProducts, drafts) {
-  const items = cityProducts.filter((p) => (Number(drafts[p.id]) || 0) > 0);
+  const items = cityProducts.filter((p) => (Number(drafts[p.id]?.qty) || 0) > 0);
   const dateStr = new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
   let text = `PEDIDO DE COMPRA - ${cityName.toUpperCase()}\nData: ${dateStr}\n\n`;
   if (items.length === 0) {
     text += "Nenhum item com quantidade a pedir definida.\n";
   } else {
     items.forEach((p) => {
-      text += `- ${p.name} (${p.sku}): ${drafts[p.id]} ${p.unit}\n`;
+      const d = drafts[p.id];
+      if (d.unit && d.unit !== p.unit) {
+        text += `- ${p.name} (${p.sku}): ${d.packageQty} ${d.unit} (${d.qty} ${p.unit})\n`;
+      } else {
+        text += `- ${p.name} (${p.sku}): ${d.qty} ${p.unit}\n`;
+      }
     });
-    const total = items.reduce((s, p) => s + (Number(drafts[p.id]) || 0), 0);
+    const total = items.reduce((s, p) => s + (Number(drafts[p.id]?.qty) || 0), 0);
     text += `\nTotal de itens: ${items.length}\nTotal de unidades: ${total}\n`;
   }
   return text;
@@ -1103,12 +1238,35 @@ function downloadTextFile(filename, text) {
 }
 
 function PedidosTab({ products, city, onSave, onRequestPrint }) {
-  const [drafts, setDrafts] = useState(() => Object.fromEntries(products.map((p) => [p.id, p.orderQty || 0])));
+  const [drafts, setDrafts] = useState(() =>
+    Object.fromEntries(
+      products.map((p) => [
+        p.id,
+        {
+          qty: p.orderQty || 0,
+          unit: p.orderPackageUnit || p.unit,
+          packageQty: p.orderPackageUnit ? (p.orderPackageQty ?? 0) : (p.orderQty || 0),
+          factor: p.orderUnitsPerPackage ?? "",
+        },
+      ])
+    )
+  );
   const [dirty, setDirty] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  function setQty(id, value) {
-    setDrafts((d) => ({ ...d, [id]: value }));
+  // Recalcula a quantidade real (na unidade-base do produto, hoje sempre
+  // UN) a partir do que foi digitado em "Tipo" + "Qtd." — se o tipo
+  // escolhido for diferente da unidade-base, usa o fator de conversão.
+  function updateDraft(p, patch) {
+    setDrafts((d) => {
+      const cur = d[p.id] || { qty: 0, unit: p.unit, packageQty: 0, factor: "" };
+      const next = { ...cur, ...patch };
+      const needsFactor = next.unit !== p.unit;
+      next.qty = needsFactor
+        ? Math.round(((Number(next.packageQty) || 0) * (Number(next.factor) || 0)) * 100) / 100
+        : Number(next.packageQty) || 0;
+      return { ...d, [p.id]: next };
+    });
     setDirty(true);
   }
 
@@ -1118,12 +1276,15 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
     if (aLow !== bLow) return aLow - bLow;
     return a.name.localeCompare(b.name);
   });
-  const cityTotal = cityProducts.reduce((s, p) => s + (Number(drafts[p.id]) || 0), 0);
+  const cityTotal = cityProducts.reduce((s, p) => s + (Number(drafts[p.id]?.qty) || 0), 0);
 
   function suggestCity() {
     setDrafts((d) => {
       const next = { ...d };
-      cityProducts.forEach((p) => { next[p.id] = suggestedQty(p); });
+      cityProducts.forEach((p) => {
+        const q = suggestedQty(p);
+        next[p.id] = { qty: q, unit: p.unit, packageQty: q, factor: "" };
+      });
       return next;
     });
     setDirty(true);
@@ -1132,7 +1293,7 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
   function clearCity() {
     setDrafts((d) => {
       const next = { ...d };
-      cityProducts.forEach((p) => { next[p.id] = 0; });
+      cityProducts.forEach((p) => { next[p.id] = { qty: 0, unit: p.unit, packageQty: 0, factor: "" }; });
       return next;
     });
     setDirty(true);
@@ -1222,20 +1383,23 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
               <tbody>
                 {cityProducts.map((p) => {
                   const low = p.quantity <= p.minStock;
+                  const d = drafts[p.id] || { qty: 0, unit: p.unit, packageQty: 0, factor: "" };
                   return (
                     <tr key={p.id}>
                       <td style={{ fontWeight: 500 }}>{p.name}</td>
                       <td style={{ color: TOKENS.inkLight }}>{p.category}</td>
                       <td className="est-mono" style={{ color: low ? TOKENS.rustDark : TOKENS.charcoal }}>{p.quantity} {p.unit}</td>
                       <td className="est-mono" style={{ color: TOKENS.inkLight }}>{p.minStock}</td>
-                      <td>
-                        <input
-                          className="est-input est-mono"
-                          type="number"
-                          min="0"
-                          style={{ width: 80 }}
-                          value={drafts[p.id] ?? 0}
-                          onChange={(e) => setQty(p.id, e.target.value === "" ? 0 : Number(e.target.value))}
+                      <td style={{ minWidth: 190 }}>
+                        <PackageQtyInput
+                          baseUnit={p.unit}
+                          quantity={d.packageQty}
+                          onQuantityChange={(v) => updateDraft(p, { packageQty: v })}
+                          unitType={d.unit}
+                          onUnitTypeChange={(v) => updateDraft(p, { unit: v })}
+                          factor={d.factor}
+                          onFactorChange={(v) => updateDraft(p, { factor: v })}
+                          label="Qtd. a pedir"
                         />
                       </td>
                     </tr>
@@ -1255,6 +1419,8 @@ function TransferenciasTab({ products, movements, onTransfer }) {
   const [toCity, setToCity] = useState(CITIES.find((c) => c !== CITIES[0]) || CITIES[0]);
   const [productId, setProductId] = useState("");
   const [quantity, setQuantity] = useState("");
+  const [unitType, setUnitType] = useState("UN");
+  const [factor, setFactor] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
@@ -1263,6 +1429,11 @@ function TransferenciasTab({ products, movements, onTransfer }) {
     .sort((a, b) => a.name.localeCompare(b.name));
   const selectedProduct = fromProducts.find((p) => p.id === productId) || null;
   const toOptions = CITIES.filter((c) => c !== fromCity);
+  const baseUnit = selectedProduct ? selectedProduct.unit : "UN";
+  const needsFactor = unitType !== baseUnit;
+  const totalQty = needsFactor
+    ? Math.round(((Number(quantity) || 0) * (Number(factor) || 0)) * 100) / 100
+    : Number(quantity) || 0;
 
   function handleFromCity(c) {
     setFromCity(c);
@@ -1280,6 +1451,15 @@ function TransferenciasTab({ products, movements, onTransfer }) {
     setSuccess("");
   }
 
+  function handleProductChange(id) {
+    setProductId(id);
+    const p = fromProducts.find((x) => x.id === id);
+    setUnitType(p ? p.unit : "UN");
+    setFactor("");
+    setError("");
+    setSuccess("");
+  }
+
   function submit(e) {
     e.preventDefault();
     setError("");
@@ -1293,20 +1473,29 @@ function TransferenciasTab({ products, movements, onTransfer }) {
       setError("Escolha um produto.");
       return;
     }
-    const qty = Number(quantity);
-    if (!qty || qty <= 0) {
+    if (!totalQty || totalQty <= 0) {
       setError("Informe uma quantidade válida.");
       return;
     }
-    if (qty > selectedProduct.quantity) {
+    if (totalQty > selectedProduct.quantity) {
       setError(`Quantidade maior que o estoque disponível (${selectedProduct.quantity} ${selectedProduct.unit}).`);
       return;
     }
 
-    onTransfer({ fromCity, toCity, product: selectedProduct, quantity: qty });
-    setSuccess(`${qty} ${selectedProduct.unit} de "${selectedProduct.name}" transferido(s) de ${fromCity} para ${toCity}.`);
+    onTransfer({
+      fromCity,
+      toCity,
+      product: selectedProduct,
+      quantity: totalQty,
+      packageInfo: needsFactor
+        ? { packageUnit: unitType, packageQty: Number(quantity), unitsPerPackage: Number(factor) }
+        : undefined,
+    });
+    setSuccess(`${totalQty} ${selectedProduct.unit} de "${selectedProduct.name}" transferido(s) de ${fromCity} para ${toCity}.`);
     setProductId("");
     setQuantity("");
+    setUnitType("UN");
+    setFactor("");
   }
 
   const recentTransfers = movements
@@ -1348,7 +1537,7 @@ function TransferenciasTab({ products, movements, onTransfer }) {
                 className="est-input"
                 style={{ width: "100%" }}
                 value={productId}
-                onChange={(e) => { setProductId(e.target.value); setError(""); setSuccess(""); }}
+                onChange={(e) => handleProductChange(e.target.value)}
               >
                 <option value="">Selecione…</option>
                 {fromProducts.map((p) => (
@@ -1358,18 +1547,19 @@ function TransferenciasTab({ products, movements, onTransfer }) {
                 ))}
               </select>
             </Field>
-            <Field label="Quantidade" style={{ flex: "1 1 120px" }}>
-              <input
-                className="est-input"
-                type="number"
-                min="0"
-                max={selectedProduct ? selectedProduct.quantity : undefined}
-                style={{ width: "100%" }}
-                value={quantity}
-                onChange={(e) => { setQuantity(e.target.value); setError(""); setSuccess(""); }}
-                placeholder={selectedProduct ? `até ${selectedProduct.quantity} ${selectedProduct.unit}` : ""}
-              />
-            </Field>
+            {selectedProduct && (
+              <div style={{ flex: "1 1 220px" }}>
+                <PackageQtyInput
+                  baseUnit={baseUnit}
+                  quantity={quantity}
+                  onQuantityChange={(v) => { setQuantity(v); setError(""); setSuccess(""); }}
+                  unitType={unitType}
+                  onUnitTypeChange={(v) => { setUnitType(v); setError(""); setSuccess(""); }}
+                  factor={factor}
+                  onFactorChange={(v) => { setFactor(v); setError(""); setSuccess(""); }}
+                />
+              </div>
+            )}
           </div>
         )}
 
@@ -1404,7 +1594,10 @@ function TransferenciasTab({ products, movements, onTransfer }) {
                       <td className="est-mono" style={{ color: TOKENS.inkLight }}>{fmtDate(m.date)}</td>
                       <td>{m.city}</td>
                       <td>{toMovement ? toMovement.city : "—"}</td>
-                      <td className="est-mono">{m.quantity} {product ? product.unit : ""} · {product ? product.name : "produto removido"}</td>
+                      <td className="est-mono">
+                        {m.packageUnit ? `${m.packageQty} ${m.packageUnit} (${m.quantity} ${product ? product.unit : ""})` : `${m.quantity} ${product ? product.unit : ""}`}
+                        {" "}· {product ? product.name : "produto removido"}
+                      </td>
                     </tr>
                   );
                 })}
@@ -1412,6 +1605,55 @@ function TransferenciasTab({ products, movements, onTransfer }) {
             </table>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function ChangelogModal({ onClose }) {
+  return (
+    <div className="est-modal-overlay" onClick={onClose}>
+      <div className="est-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 480 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+            <Sparkles size={16} color={TOKENS.amber} /> Novidades
+          </div>
+          <button type="button" onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 22, maxHeight: "60vh", overflowY: "auto" }}>
+          {CHANGELOG.map((entry) => (
+            <div key={entry.date}>
+              <div className="est-mono" style={{ fontSize: 11, color: TOKENS.inkLight, marginBottom: 8 }}>{entry.date}</div>
+              {entry.added && entry.added.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: TOKENS.tealDark, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>
+                    Adicionado
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 5 }}>
+                    {entry.added.map((item, i) => (
+                      <li key={i} style={{ fontSize: 13, color: TOKENS.charcoal, lineHeight: 1.4 }}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {entry.fixed && entry.fixed.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: TOKENS.rustDark, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>
+                    Corrigido
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 5 }}>
+                    {entry.fixed.map((item, i) => (
+                      <li key={i} style={{ fontSize: 13, color: TOKENS.charcoal, lineHeight: 1.4 }}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
+          <button type="button" className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={onClose}>Fechar</button>
+        </div>
       </div>
     </div>
   );
@@ -1537,7 +1779,7 @@ const PRODUTOS_COLUMNS = [
   { key: "unitPrice", label: "Preço", type: "number" },
 ];
 
-function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setCatFilter, onNew, onEdit, onDelete }) {
+function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setCatFilter, onNew, onEdit, onDelete, onConvert }) {
   const duplicateGroups = findDuplicateSkus(allProducts || products);
   const [sort, setSort] = useState({ key: null, dir: "asc" });
 
@@ -1635,6 +1877,9 @@ function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setC
                   <td className="est-mono">{p.unitPrice > 0 ? fmtBRL(p.unitPrice) : "—"}</td>
                   <td>
                     <div style={{ display: "flex", gap: 6 }}>
+                      {p.unit !== "UN" && (
+                        <button onClick={() => onConvert(p)} title="Converter para UN" style={{ background: "none", border: "none", cursor: "pointer", color: TOKENS.purple }}><Divide size={14} /></button>
+                      )}
                       <button onClick={() => onEdit(p)} style={{ background: "none", border: "none", cursor: "pointer", color: TOKENS.teal }}><Edit2 size={14} /></button>
                       <button onClick={() => onDelete(p)} style={{ background: "none", border: "none", cursor: "pointer", color: TOKENS.rust }}><Trash2 size={14} /></button>
                     </div>
@@ -1689,7 +1934,16 @@ function MovimentacoesTab({ products, movements, onEntrada, onSaida, onImportar,
                     </span>
                   </td>
                   <td>{p ? p.name : "Produto removido"}</td>
-                  <td className="est-mono">{m.quantity} {p ? p.unit : ""}</td>
+                  <td className="est-mono">
+                    {m.packageUnit ? (
+                      <>
+                        {m.packageQty} {m.packageUnit}{" "}
+                        <span style={{ color: TOKENS.inkLight }}>({m.quantity} {p ? p.unit : ""})</span>
+                      </>
+                    ) : (
+                      <>{m.quantity} {p ? p.unit : ""}</>
+                    )}
+                  </td>
                   <td style={{ color: TOKENS.inkLight, fontSize: 12 }}>{m.note || "—"}</td>
                   <td>
                     <div style={{ display: "flex", gap: 6 }}>
@@ -1818,8 +2072,15 @@ function ProductModal({ product, defaultCity, allProducts, onSave, onClose }) {
     e.preventDefault();
     if (!form.name.trim() || !form.sku.trim()) return;
 
+    // Reaproveitar o mesmo SKU em filiais diferentes é normal (é assim que o
+    // catálogo replicado identifica "o mesmo item" em cada cidade). Só é
+    // bloqueado quando é uma colisão de verdade: outro produto com nome
+    // diferente usando esse SKU, ou outro produto na MESMA filial.
     const duplicate = (allProducts || []).find(
-      (p) => normalizeSku(p.sku) === normalizeSku(form.sku) && p.id !== form.id
+      (p) =>
+        p.id !== form.id &&
+        normalizeSku(p.sku) === normalizeSku(form.sku) &&
+        (p.name.trim().toLowerCase() !== form.name.trim().toLowerCase() || p.city === form.city)
     );
     if (duplicate) {
       setSkuError(`Esse SKU já está em uso por "${duplicate.name}" (${duplicate.city}). Escolha outro.`);
@@ -1885,17 +2146,88 @@ function ProductModal({ product, defaultCity, allProducts, onSave, onClose }) {
   );
 }
 
+function ConvertUnitModal({ product, allProducts, onConvert, onClose }) {
+  const [factor, setFactor] = useState("");
+  const relatedProducts = allProducts.filter(
+    (p) => p.name.trim().toLowerCase() === product.name.trim().toLowerCase() && p.unit !== "UN"
+  );
+  const f = Number(factor) || 0;
+
+  function submit(e) {
+    e.preventDefault();
+    if (f <= 0) return;
+    onConvert(product.name, f);
+  }
+
+  return (
+    <div className="est-modal-overlay" onClick={onClose}>
+      <form className="est-modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16 }}>
+            Converter "{product.name}" para UN
+          </div>
+          <button type="button" onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+        </div>
+        <p style={{ fontSize: 12, color: TOKENS.inkLight, marginBottom: 14 }}>
+          Isso converte esse item para UN em <strong>todas as filiais</strong> de uma vez (estoque, mínimo, preço unitário e qtd. a pedir são recalculados). O SKU não muda.
+        </p>
+        <Field label={`Quantas UN tem em 1 ${product.unit}?`}>
+          <input className="est-input" style={{ width: "100%" }} type="number" min="0" step="0.01" autoFocus value={factor} onChange={(e) => setFactor(e.target.value)} placeholder="ex: 15" required />
+        </Field>
+        {f > 0 && (
+          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ fontSize: 11, color: TOKENS.inkLight, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>Prévia</div>
+            {relatedProducts.map((p) => (
+              <div key={p.id} className="est-mono" style={{ fontSize: 12, display: "flex", justifyContent: "space-between", color: TOKENS.charcoal }}>
+                <span>{p.city}</span>
+                <span>{p.quantity} {p.unit} → {Math.round(p.quantity * f)} UN</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
+          <button type="button" className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={onClose}>Cancelar</button>
+          <button type="submit" className="est-btn" style={{ background: TOKENS.ink, color: "#fff" }} disabled={f <= 0}>Converter</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function MovementModal({ type, products, onSave, onClose }) {
   const [productId, setProductId] = useState(products[0]?.id || "");
   const [quantity, setQuantity] = useState(1);
+  const [unitType, setUnitType] = useState(products[0]?.unit || "UN");
+  const [factor, setFactor] = useState("");
   const [note, setNote] = useState("");
   const isIn = type === "entrada";
   const selected = products.find((p) => p.id === productId);
 
+  function handleProductChange(id) {
+    setProductId(id);
+    const p = products.find((x) => x.id === id);
+    setUnitType(p ? p.unit : "UN");
+    setFactor("");
+  }
+
+  const baseUnit = selected ? selected.unit : "UN";
+  const needsFactor = unitType !== baseUnit;
+  const totalQty = needsFactor
+    ? Math.round(((Number(quantity) || 0) * (Number(factor) || 0)) * 100) / 100
+    : Number(quantity) || 0;
+
   function submit(e) {
     e.preventDefault();
-    if (!productId || quantity <= 0) return;
-    onSave({ productId, type, quantity: Number(quantity), note });
+    if (!productId || totalQty <= 0) return;
+    onSave({
+      productId,
+      type,
+      quantity: totalQty,
+      note,
+      ...(needsFactor
+        ? { packageUnit: unitType, packageQty: Number(quantity), unitsPerPackage: Number(factor) }
+        : {}),
+    });
   }
 
   return (
@@ -1910,14 +2242,20 @@ function MovementModal({ type, products, onSave, onClose }) {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <Field label="Produto">
-            <select className="est-input" style={{ width: "100%" }} value={productId} onChange={(e) => setProductId(e.target.value)}>
+            <select className="est-input" style={{ width: "100%" }} value={productId} onChange={(e) => handleProductChange(e.target.value)}>
               {products.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.sku})</option>)}
             </select>
           </Field>
-          <Field label={`Quantidade${selected ? ` (${selected.unit})` : ""}`}>
-            <input className="est-input" style={{ width: "100%" }} type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} required />
-          </Field>
-          {selected && !isIn && Number(quantity) > selected.quantity && (
+          <PackageQtyInput
+            baseUnit={baseUnit}
+            quantity={quantity}
+            onQuantityChange={setQuantity}
+            unitType={unitType}
+            onUnitTypeChange={setUnitType}
+            factor={factor}
+            onFactorChange={setFactor}
+          />
+          {selected && !isIn && totalQty > selected.quantity && (
             <div style={{ fontSize: 12, color: TOKENS.rustDark, background: `${TOKENS.rust}12`, padding: "6px 10px", borderRadius: 6 }}>
               Estoque atual: {selected.quantity} {selected.unit}. A saída deixará o saldo ajustado para zero.
             </div>
@@ -2296,5 +2634,42 @@ function Field({ label, children, style }) {
       {label}
       {children}
     </label>
+  );
+}
+
+// Campo composto de quantidade + "tipo" (UN/CX/PCT/FARDO). Quando o tipo
+// escolhido é diferente da unidade-base do produto (que hoje é sempre UN),
+// mostra um campo extra pra converter — "quantos UN tem em 1 CX/PCT/FARDO"
+// — e uma prévia do total já convertido. Isso permite registrar entradas,
+// saídas, transferências e pedidos em caixa/fardo sem que o estoque real
+// (guardado sempre na unidade-base do produto) fique bagunçado.
+function PackageQtyInput({ baseUnit, quantity, onQuantityChange, unitType, onUnitTypeChange, factor, onFactorChange, label = "Quantidade" }) {
+  const needsFactor = unitType !== baseUnit;
+  const total = needsFactor
+    ? Math.round(((Number(quantity) || 0) * (Number(factor) || 0)) * 100) / 100
+    : Number(quantity) || 0;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Field label={label} style={{ flex: 1 }}>
+          <input className="est-input" style={{ width: "100%" }} type="number" min="0" value={quantity} onChange={(e) => onQuantityChange(e.target.value)} />
+        </Field>
+        <Field label="Tipo" style={{ width: 96 }}>
+          <select className="est-input" style={{ width: "100%" }} value={unitType} onChange={(e) => onUnitTypeChange(e.target.value)}>
+            {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+          </select>
+        </Field>
+      </div>
+      {needsFactor && (
+        <>
+          <Field label={`Quantos ${baseUnit} tem em 1 ${unitType}?`}>
+            <input className="est-input" style={{ width: "100%" }} type="number" min="0" step="0.01" value={factor} onChange={(e) => onFactorChange(e.target.value)} placeholder="ex: 15" />
+          </Field>
+          <div className="est-mono" style={{ fontSize: 12, color: TOKENS.inkLight }}>
+            = <strong style={{ color: TOKENS.charcoal }}>{total}</strong> {baseUnit}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
