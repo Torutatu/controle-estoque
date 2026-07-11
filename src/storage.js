@@ -35,6 +35,13 @@ const localBackend = {
       return null;
     }
   },
+
+  // Sem Supabase não há como sincronizar entre dispositivos/abas em tempo
+  // real — devolve uma função de "desinscrever" vazia só pra manter a mesma
+  // API dos dois backends.
+  subscribe(key, onChange) {
+    return () => {};
+  },
 };
 
 const supabaseBackend = {
@@ -65,6 +72,35 @@ const supabaseBackend = {
       console.error("Falha ao salvar no Supabase", e);
       return null;
     }
+  },
+
+  // Escuta mudanças na linha (feitas por qualquer dispositivo/usuário) via
+  // Supabase Realtime, e chama onChange(value, updatedAt) quando alguém
+  // salva. Isso mantém as telas de quem estiver com o app aberto atualizadas
+  // quase na hora, em vez de só na próxima vez que a pessoa recarregar a
+  // página — reduz (mas não elimina 100%) o risco de duas pessoas
+  // sobrescreverem uma a outra ao editar ao mesmo tempo.
+  //
+  // Requer que a replicação em tempo real esteja ativada pra tabela
+  // `app_state` no projeto Supabase (veja supabase/schema.sql).
+  subscribe(key, onChange) {
+    const channel = supabase
+      .channel(`app_state_${key}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "app_state", filter: `key=eq.${key}` },
+        (payload) => {
+          const row = payload.new;
+          if (row && typeof row.value === "string") {
+            onChange(row.value, row.updated_at);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   },
 };
 

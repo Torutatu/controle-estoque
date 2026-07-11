@@ -17,6 +17,11 @@ Todas as alterações relevantes do projeto **Controle de Estoque** são documen
 - Campo de origem da entrada (Comprado localmente / Veio da matriz) ao registrar uma entrada em Movimentações, exibido no histórico.
 - Botão "PDF (Local)" em Pedidos, gerando um documento separado só com os itens marcados como compra local.
 - Botão "Redefinir p/ Matriz" em Pedidos, pra voltar todos os itens de uma filial pra "Matriz" de uma vez, sem precisar clicar item por item.
+- Autoria: toda movimentação (entrada/saída/transferência) e edição de produto passa a registrar quem fez, exibido no histórico de Movimentações.
+- Cabeçalho mostra "Última atualização: quem e quando" a cada mudança salva no estoque.
+- Sincronização quase em tempo real entre quem estiver com o app aberto ao mesmo tempo (via Supabase Realtime) — reduz bastante o risco de duas pessoas sobrescreverem uma a outra ao editar juntas, embora não elimine 100% (editar o mesmíssimo item nos mesmos segundos ainda pode gerar conflito).
+- Botão "Backup" no cabeçalho: baixa um `.json` com todo o estoque (produtos + movimentações), como cópia de segurança fora do banco.
+- Lixeira (aba Produtos): apagar um produto agora só o esconde e preserva seu histórico de movimentações, com opção de restaurar.
 
 ### Corrigido
 - Validação de SKU que impedia salvar um produto com um SKU legitimamente reaproveitado em outra filial (ex: editar "Chá" em Palotina).

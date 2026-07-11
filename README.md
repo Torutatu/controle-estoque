@@ -30,7 +30,12 @@ o mesmo estoque, com login.
 2. No painel do projeto, abra **SQL Editor → New query**, cole o conteúdo do arquivo
    [`supabase/schema.sql`](./supabase/schema.sql) deste repositório e clique em **Run**.
    Isso cria a tabela `app_state` (onde o estoque fica salvo) já protegida — só quem
-   estiver logado consegue ler ou escrever.
+   estiver logado consegue ler ou escrever — e ativa a sincronização em tempo real
+   (pra ver mudanças da outra pessoa sem precisar recarregar a página).
+
+   **Se você já rodou esse script antes** (projeto configurado antes de julho/2026),
+   rode de novo — o script é seguro pra rodar mais de uma vez e vai só ativar a parte
+   de tempo real que faltava.
 3. Vá em **Authentication → Users → Add user** e crie os dois usuários do app:
    - `Dhierry` → e-mail configurado em `src/supabaseClient.js` (hoje `dhierrye@gmail.com`)
    - `Francielle` → e-mail configurado em `src/supabaseClient.js` (hoje um placeholder,
@@ -131,10 +136,19 @@ supabase/
   schema.sql         -> script SQL pra rodar no seu projeto Supabase
 ```
 
+## Backup e histórico
+
+- O botão **Backup** no cabeçalho baixa um `.json` com todo o estoque (produtos +
+  movimentações) — guarde de vez em quando como cópia de segurança fora do banco.
+- Apagar um produto (aba Produtos) não remove o histórico dele nem apaga de verdade —
+  só esconde das telas normais. Dá pra restaurar pelo botão **Lixeira**, que só aparece
+  quando há algo apagado.
+- Toda movimentação e edição de produto fica marcada com o nome de quem fez, e o
+  cabeçalho mostra a última atualização do estoque (quem e quando).
+
 ## Próximos passos possíveis
 
 - Trocar os dois usuários fixos (Dhierry/Francielle) por um cadastro de usuários mais
   flexível, se a equipe crescer.
-- Adicionar exportação do estoque atual para planilha (hoje só importa).
-- Sincronização em tempo real (Supabase Realtime) pra ver mudanças de outra pessoa
-  sem precisar recarregar a página.
+- Restaurar um backup `.json` direto pela tela (hoje o botão só baixa; restaurar exige
+  colar o conteúdo manualmente na tabela `app_state` do Supabase, se um dia precisar).

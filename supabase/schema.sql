@@ -44,3 +44,18 @@ create policy "app_state update for authenticated"
   to authenticated
   using (true)
   with check (true);
+
+-- Ativa a replicação em tempo real da tabela — é o que permite que, se
+-- Dhierry e Francielle estiverem com o app aberto ao mesmo tempo, a tela de
+-- uma se atualize sozinha quando a outra salvar algo (em vez de precisar
+-- recarregar a página pra ver a mudança). Sem isso, o app continua
+-- funcionando normalmente, só sem essa atualização automática.
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and tablename = 'app_state'
+  ) then
+    alter publication supabase_realtime add table app_state;
+  end if;
+end $$;

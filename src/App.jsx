@@ -8,12 +8,12 @@ import {
   X, Search, LayoutGrid, ClipboardList, FileBarChart,
   ArrowUpCircle, ArrowDownCircle, Boxes, MapPin, ShoppingCart, Wand2,
   Copy, Download, Check, FileText, Upload, FileSpreadsheet, AlertCircle,
-  ArrowLeftRight, ChevronUp, ChevronDown, ChevronsUpDown, Divide, Sparkles, RotateCcw,
+  ArrowLeftRight, ChevronUp, ChevronDown, ChevronsUpDown, Divide, Sparkles, RotateCcw, Archive,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { storage, readLegacyLocalStorage } from "./storage";
 import { isSupabaseConfigured } from "./supabaseClient";
-import { LogoutButton } from "./Auth.jsx";
+import { LogoutButton, useAuth } from "./Auth.jsx";
 
 import { TOKENS } from "./theme";
 
@@ -43,6 +43,11 @@ const CHANGELOG = [
       "Campo de origem da entrada (Comprado localmente / Veio da matriz) ao registrar uma entrada em Movimentações.",
       "Botão \"PDF (Local)\" em Pedidos, pra gerar um documento separado só com os itens de compra local.",
       "Botão \"Redefinir p/ Matriz\" em Pedidos, pra voltar todos os itens de uma filial pra \"Matriz\" de uma vez.",
+      "Autoria: movimentações e edições de produto agora registram quem fez, visível no histórico de Movimentações.",
+      "Cabeçalho mostra a última atualização do estoque (quem e quando).",
+      "Sincronização quase em tempo real entre quem estiver com o app aberto ao mesmo tempo, via Supabase Realtime.",
+      "Botão \"Backup\" no cabeçalho: baixa um .json com todo o estoque, como cópia de segurança.",
+      "Lixeira (aba Produtos): apagar um produto só esconde e preserva o histórico, com opção de restaurar.",
     ],
     fixed: [
       "Validação de SKU que impedia salvar um produto com SKU legitimamente reaproveitado em outra filial.",
@@ -218,6 +223,10 @@ function fmtBRL(v) {
 function fmtDate(iso) {
   return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
 }
+function fmtDateTime(iso) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
 function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -379,6 +388,7 @@ function alignCatalogWithToledo(products) {
 }
 
 export default function ControleEstoque() {
+  const { userName } = useAuth();
   const [products, setProducts] = useState(null);
   const [movements, setMovements] = useState(null);
   const [ready, setReady] = useState(false);
@@ -395,6 +405,8 @@ export default function ControleEstoque() {
   const [convertModal, setConvertModal] = useState(null);
   const [printTarget, setPrintTarget] = useState(null); // null | { city: cityName | 'all', source: 'matriz' | 'local' }
   const [showChangelog, setShowChangelog] = useState(false);
+  const [showTrash, setShowTrash] = useState(false);
+  const [lastEdited, setLastEdited] = useState(null); // { by, at } | null
 
   useEffect(() => {
     if (!printTarget) return;
@@ -501,6 +513,7 @@ export default function ControleEstoque() {
           }
           setProducts(migrated);
           setMovements(movs);
+          if (parsed.lastEditedBy) setLastEdited({ by: parsed.lastEditedBy, at: parsed.lastEditedAt });
           if (needsSave) {
             await storage.set(
               "estoque-data-v2",
@@ -510,6 +523,8 @@ export default function ControleEstoque() {
                 catalogReplicated: true,
                 skuConflictsResolved: true,
                 catalogAligned: true,
+                lastEditedBy: parsed.lastEditedBy,
+                lastEditedAt: parsed.lastEditedAt,
               })
             );
           }
@@ -536,9 +551,32 @@ export default function ControleEstoque() {
     })();
   }, []);
 
+  // Mantém a tela sincronizada quase em tempo real com o que a outra pessoa
+  // salvar (via Supabase Realtime) — reduz bastante a janela em que duas
+  // pessoas mexendo ao mesmo tempo poderiam sobrescrever uma a outra, mas
+  // não elimina o risco por completo: se as duas editarem o mesmíssimo
+  // produto/movimentação dentro de poucos segundos uma da outra, quem salvar
+  // por último ainda prevalece. Sem Supabase configurado, isso não faz nada.
+  useEffect(() => {
+    if (!ready) return;
+    const unsubscribe = storage.subscribe("estoque-data-v2", (rawValue) => {
+      try {
+        const parsed = JSON.parse(rawValue);
+        setProducts((parsed.products || []).map((p) => ({ orderQty: 0, ...p })));
+        setMovements(parsed.movements || []);
+        if (parsed.lastEditedBy) setLastEdited({ by: parsed.lastEditedBy, at: parsed.lastEditedAt });
+      } catch (e) {
+        console.error("Falha ao processar atualização em tempo real", e);
+      }
+    });
+    return unsubscribe;
+  }, [ready]);
+
   async function persist(nextProducts, nextMovements) {
     setProducts(nextProducts);
     setMovements(nextMovements);
+    const editedAt = new Date().toISOString();
+    setLastEdited({ by: userName, at: editedAt });
     try {
       await storage.set(
         "estoque-data-v2",
@@ -548,6 +586,8 @@ export default function ControleEstoque() {
           catalogReplicated: true,
           skuConflictsResolved: true,
           catalogAligned: true,
+          lastEditedBy: userName,
+          lastEditedAt: editedAt,
         })
       );
     } catch (e) {
@@ -555,19 +595,51 @@ export default function ControleEstoque() {
     }
   }
 
+  // Baixa uma cópia completa do estoque (produtos + movimentações de todas
+  // as filiais) num arquivo .json — serve como backup fora do banco, caso
+  // algo seja apagado por engano ou o banco tenha algum problema. Pra
+  // restaurar, é só guardar o arquivo; se um dia precisar, dá pra colar o
+  // conteúdo de volta na tabela app_state do Supabase manualmente.
+  function downloadBackup() {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      exportedBy: userName,
+      products,
+      movements,
+    };
+    downloadTextFile(`backup-estoque-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(payload, null, 2));
+  }
+
   function saveProduct(p) {
+    const now = new Date().toISOString();
     if (p.id) {
-      persist(products.map((x) => (x.id === p.id ? p : x)), movements);
+      const stamped = { ...p, updatedBy: userName, updatedAt: now };
+      persist(products.map((x) => (x.id === p.id ? stamped : x)), movements);
     } else {
-      const newP = { ...p, id: uid() };
+      const newP = { ...p, id: uid(), createdBy: userName, createdAt: now, updatedBy: userName, updatedAt: now };
       persist([newP, ...products], movements);
     }
     setProductModal(null);
   }
 
+  // Não apaga de verdade — marca como "deleted" e preserva o histórico de
+  // movimentações do item, pra dar pra desfazer um apagão por engano na
+  // Lixeira (aba Produtos). O produto some das telas normais, mas continua
+  // no banco.
   function deleteProduct(id) {
-    persist(products.filter((p) => p.id !== id), movements.filter((m) => m.productId !== id));
+    const now = new Date().toISOString();
+    const nextProducts = products.map((p) =>
+      p.id === id ? { ...p, deleted: true, deletedBy: userName, deletedAt: now } : p
+    );
+    persist(nextProducts, movements);
     setConfirmDelete(null);
+  }
+
+  function restoreProduct(id) {
+    const nextProducts = products.map((p) =>
+      p.id === id ? { ...p, deleted: false, deletedBy: null, deletedAt: null } : p
+    );
+    persist(nextProducts, movements);
   }
 
   // Converte um item (identificado pelo nome) de uma unidade "embalada"
@@ -600,7 +672,7 @@ export default function ControleEstoque() {
     const nextProducts = products.map((p) =>
       p.id === mv.productId ? { ...p, quantity: Math.max(0, p.quantity + delta) } : p
     );
-    const newMv = { ...mv, id: uid(), city: product.city, date: new Date().toISOString() };
+    const newMv = { ...mv, id: uid(), city: product.city, date: new Date().toISOString(), createdBy: userName };
     persist(nextProducts, [newMv, ...movements]);
     setMoveModal(null);
   }
@@ -664,6 +736,7 @@ export default function ControleEstoque() {
       city: fromCity,
       date: now,
       transferId,
+      createdBy: userName,
       ...(packageInfo || {}),
     };
     const inMovement = {
@@ -675,6 +748,7 @@ export default function ControleEstoque() {
       city: toCity,
       date: now,
       transferId,
+      createdBy: userName,
       ...(packageInfo || {}),
     };
 
@@ -705,7 +779,7 @@ export default function ControleEstoque() {
         return p;
       });
       const nextMovements = movements.map((m) => {
-        if (m.id === original.id) return { ...m, quantity: newQty, note: updates.note };
+        if (m.id === original.id) return { ...m, quantity: newQty, note: updates.note, editedBy: userName, editedAt: new Date().toISOString() };
         if (m.id === linked.id) return { ...m, quantity: newQty };
         return m;
       });
@@ -729,6 +803,8 @@ export default function ControleEstoque() {
               type: updates.type,
               quantity: newQty,
               note: updates.note,
+              editedBy: userName,
+              editedAt: new Date().toISOString(),
               ...(updates.hasOwnProperty("source") ? { source: updates.source } : {}),
             }
           : m
@@ -792,6 +868,7 @@ export default function ControleEstoque() {
         note: row.note || "Importado de planilha",
         city: product.city,
         date: now,
+        createdBy: userName,
       });
     });
 
@@ -832,7 +909,15 @@ export default function ControleEstoque() {
     persist(nextProducts, movements);
   }
 
-  const cityProducts = useMemo(() => (products || []).filter((p) => p.city === city), [products, city]);
+  // "Apagar" um produto só marca deleted:true (veja deleteProduct) pra dar
+  // pra restaurar na Lixeira — por isso a maioria das telas usa as listas
+  // "ativas" abaixo, que escondem os produtos apagados. A exceção é a
+  // Movimentações (cityProductsForHistory), que precisa continuar mostrando
+  // o nome/unidade certos mesmo pra um produto já apagado, senão o
+  // histórico antigo vira "Produto removido" sem necessidade.
+  const activeProducts = useMemo(() => (products || []).filter((p) => !p.deleted), [products]);
+  const cityProducts = useMemo(() => activeProducts.filter((p) => p.city === city), [activeProducts, city]);
+  const cityProductsForHistory = useMemo(() => (products || []).filter((p) => p.city === city), [products, city]);
   const cityMovements = useMemo(() => (movements || []).filter((m) => m.city === city), [movements, city]);
 
   const stats = useMemo(() => {
@@ -937,12 +1022,26 @@ export default function ControleEstoque() {
                 CONTROLE DE ESTOQUE
               </div>
               <div className="est-mono" style={{ fontSize: 11, color: "#B9C4CE" }}>gestão de produtos e movimentações por filial</div>
+              {lastEdited && lastEdited.by && (
+                <div className="est-mono" style={{ fontSize: 10, color: "#8996A3", marginTop: 2 }}>
+                  Última atualização: {lastEdited.by} · {fmtDateTime(lastEdited.at)}
+                </div>
+              )}
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div className="est-mono" style={{ fontSize: 11, color: "#B9C4CE", background: "#ffffff14", padding: "6px 12px", borderRadius: 6 }}>
               {new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" })}
             </div>
+            <button
+              type="button"
+              onClick={downloadBackup}
+              title="Baixar uma cópia completa do estoque (produtos + movimentações)"
+              className="est-mono"
+              style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#B9C4CE", background: "#ffffff14", border: "none", borderRadius: 6, padding: "6px 10px", cursor: "pointer" }}
+            >
+              <Download size={12} /> Backup
+            </button>
             <button
               type="button"
               onClick={() => setShowChangelog(true)}
@@ -959,7 +1058,7 @@ export default function ControleEstoque() {
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
           <MapPin size={14} color="#B9C4CE" />
           {CITIES.map((c) => {
-            const count = products.filter((p) => p.city === c).length;
+            const count = activeProducts.filter((p) => p.city === c).length;
             const active = c === city;
             return (
               <div
@@ -1020,7 +1119,7 @@ export default function ControleEstoque() {
       <div style={{ background: "#fff", border: `1px solid ${TOKENS.line}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 24, minHeight: 480 }}>
         {tab === "pedidos" ? (
           <PedidosTab
-            products={products}
+            products={activeProducts}
             city={city}
             onSave={updateOrderQuantities}
             onRequestPrint={setPrintTarget}
@@ -1028,7 +1127,7 @@ export default function ControleEstoque() {
             onResetSource={resetOrderSourceToMatriz}
           />
         ) : tab === "transferencias" ? (
-          <TransferenciasTab products={products} movements={movements} onTransfer={transferStock} />
+          <TransferenciasTab products={activeProducts} movements={movements} onTransfer={transferStock} />
         ) : cityProducts.length === 0 ? (
           <EmptyCity city={city} onAdd={() => setProductModal("new")} />
         ) : (
@@ -1040,7 +1139,7 @@ export default function ControleEstoque() {
             {tab === "produtos" && (
               <ProdutosTab
                 products={filteredProducts}
-                allProducts={products}
+                allProducts={activeProducts}
                 search={search}
                 setSearch={setSearch}
                 catFilter={catFilter}
@@ -1049,12 +1148,14 @@ export default function ControleEstoque() {
                 onEdit={(p) => setProductModal(p)}
                 onDelete={(p) => setConfirmDelete(p)}
                 onConvert={(p) => setConvertModal(p)}
+                trashCount={products.filter((p) => p.deleted).length}
+                onOpenTrash={() => setShowTrash(true)}
               />
             )}
 
             {tab === "movimentacoes" && (
               <MovimentacoesTab
-                products={cityProducts}
+                products={cityProductsForHistory}
                 movements={cityMovements}
                 onEntrada={() => setMoveModal({ type: "entrada" })}
                 onSaida={() => setMoveModal({ type: "saida" })}
@@ -1075,7 +1176,7 @@ export default function ControleEstoque() {
         <ProductModal
           product={productModal === "new" ? null : productModal}
           defaultCity={city}
-          allProducts={products}
+          allProducts={activeProducts}
           onSave={saveProduct}
           onClose={() => setProductModal(null)}
         />
@@ -1098,7 +1199,7 @@ export default function ControleEstoque() {
               ? movements.find((m) => m.transferId === moveEditModal.transferId && m.id !== moveEditModal.id)
               : null
           }
-          products={products}
+          products={activeProducts}
           onSave={(updates) => editMovement(moveEditModal, updates)}
           onDelete={() => { setConfirmDeleteMovement(moveEditModal); setMoveEditModal(null); }}
           onClose={() => setMoveEditModal(null)}
@@ -1108,7 +1209,7 @@ export default function ControleEstoque() {
       {convertModal && (
         <ConvertUnitModal
           product={convertModal}
-          allProducts={products}
+          allProducts={activeProducts}
           onConvert={convertProductUnit}
           onClose={() => setConvertModal(null)}
         />
@@ -1149,7 +1250,7 @@ export default function ControleEstoque() {
               Remover produto?
             </div>
             <p style={{ fontSize: 13, color: TOKENS.inkLight, marginBottom: 20 }}>
-              "{confirmDelete.name}" e todo o seu histórico de movimentações serão removidos. Essa ação não pode ser desfeita.
+              "{confirmDelete.name}" some das telas de uso normal, mas o histórico de movimentações é mantido e dá pra restaurar depois pela Lixeira (aba Produtos).
             </p>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={() => setConfirmDelete(null)}>Cancelar</button>
@@ -1160,9 +1261,17 @@ export default function ControleEstoque() {
       )}
 
       {showChangelog && <ChangelogModal onClose={() => setShowChangelog(false)} />}
+
+      {showTrash && (
+        <TrashModal
+          products={products.filter((p) => p.deleted)}
+          onRestore={restoreProduct}
+          onClose={() => setShowTrash(false)}
+        />
+      )}
     </div>
 
-    <PrintSheet products={products} target={printTarget} />
+    <PrintSheet products={activeProducts} target={printTarget} />
     </>
   );
 }
@@ -1830,6 +1939,56 @@ function ChangelogModal({ onClose }) {
   );
 }
 
+// Lista os produtos apagados (de todas as filiais) e permite restaurar. Nada
+// aqui é apagado de verdade — deleteProduct só marca "deleted: true" — então
+// isso serve como uma rede de segurança contra remoção por engano.
+function TrashModal({ products, onClose, onRestore }) {
+  return (
+    <div className="est-modal-overlay" onClick={onClose}>
+      <div className="est-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+            <Archive size={16} color={TOKENS.rustDark} /> Lixeira
+          </div>
+          <button type="button" onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+        </div>
+
+        {products.length === 0 ? (
+          <p style={{ fontSize: 13, color: TOKENS.inkLight }}>Nenhum produto apagado no momento.</p>
+        ) : (
+          <div style={{ overflowX: "auto", maxHeight: "60vh", overflowY: "auto" }}>
+            <table className="est-table">
+              <thead>
+                <tr><th>Produto</th><th>Filial</th><th>Apagado por</th><th>Quando</th><th></th></tr>
+              </thead>
+              <tbody>
+                {products.map((p) => (
+                  <tr key={p.id}>
+                    <td style={{ fontWeight: 500 }}>{p.name}</td>
+                    <td style={{ color: TOKENS.inkLight }}>{p.city}</td>
+                    <td style={{ color: TOKENS.inkLight, fontSize: 12 }}>{p.deletedBy || "—"}</td>
+                    <td className="est-mono" style={{ color: TOKENS.inkLight, fontSize: 12 }}>{fmtDateTime(p.deletedAt)}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="est-btn"
+                        style={{ background: TOKENS.paperDark, color: TOKENS.charcoal, padding: "5px 10px", fontSize: 12 }}
+                        onClick={() => onRestore(p.id)}
+                      >
+                        <RotateCcw size={12} /> Restaurar
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function EmptyCity({ city, onAdd }) {
   return (
     <div style={{ textAlign: "center", padding: "64px 20px", color: TOKENS.inkLight }}>
@@ -1957,7 +2116,7 @@ const PEDIDOS_COLUMNS = [
   { key: "minStock", label: "Mínimo", type: "number" },
 ];
 
-function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setCatFilter, onNew, onEdit, onDelete, onConvert }) {
+function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setCatFilter, onNew, onEdit, onDelete, onConvert, trashCount, onOpenTrash }) {
   const duplicateGroups = findDuplicateSkus(allProducts || products);
   const [sort, setSort] = useState({ key: null, dir: "asc" });
 
@@ -2007,9 +2166,16 @@ function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setC
             {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
           </select>
         </div>
-        <button className="est-btn" style={{ background: TOKENS.ink, color: "#fff" }} onClick={onNew}>
-          <Plus size={14} /> Novo produto
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          {trashCount > 0 && (
+            <button className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={onOpenTrash}>
+              <Archive size={14} /> Lixeira ({trashCount})
+            </button>
+          )}
+          <button className="est-btn" style={{ background: TOKENS.ink, color: "#fff" }} onClick={onNew}>
+            <Plus size={14} /> Novo produto
+          </button>
+        </div>
       </div>
 
       <div style={{ overflowX: "auto" }}>
@@ -2091,11 +2257,11 @@ function MovimentacoesTab({ products, movements, onEntrada, onSaida, onImportar,
       <div style={{ overflowX: "auto" }}>
         <table className="est-table">
           <thead>
-            <tr><th>Data</th><th>Tipo</th><th>Produto</th><th>Quantidade</th><th>Observação</th><th></th></tr>
+            <tr><th>Data</th><th>Tipo</th><th>Produto</th><th>Quantidade</th><th>Observação</th><th>Por</th><th></th></tr>
           </thead>
           <tbody>
             {sorted.length === 0 && (
-              <tr><td colSpan={6} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>Nenhuma movimentação registrada nesta filial ainda.</td></tr>
+              <tr><td colSpan={7} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>Nenhuma movimentação registrada nesta filial ainda.</td></tr>
             )}
             {sorted.map((m) => {
               const p = productMap[m.productId];
@@ -2128,6 +2294,10 @@ function MovimentacoesTab({ products, movements, onEntrada, onSaida, onImportar,
                     )}
                   </td>
                   <td style={{ color: TOKENS.inkLight, fontSize: 12 }}>{m.note || "—"}</td>
+                  <td style={{ color: TOKENS.inkLight, fontSize: 12 }}>
+                    {m.createdBy || "—"}
+                    {m.editedBy && <div style={{ fontSize: 10 }}>editado por {m.editedBy}</div>}
+                  </td>
                   <td>
                     <div style={{ display: "flex", gap: 6 }}>
                       <button onClick={() => onEditMovement(m)} style={{ background: "none", border: "none", cursor: "pointer", color: TOKENS.teal }}><Edit2 size={14} /></button>
