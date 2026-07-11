@@ -8,7 +8,7 @@ import {
   X, Search, LayoutGrid, ClipboardList, FileBarChart,
   ArrowUpCircle, ArrowDownCircle, Boxes, MapPin, ShoppingCart, Wand2,
   Copy, Download, Check, FileText, Upload, FileSpreadsheet, AlertCircle,
-  ArrowLeftRight, ChevronUp, ChevronDown, ChevronsUpDown, Divide, Sparkles,
+  ArrowLeftRight, ChevronUp, ChevronDown, ChevronsUpDown, Divide, Sparkles, RotateCcw,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { storage, readLegacyLocalStorage } from "./storage";
@@ -37,6 +37,12 @@ const CHANGELOG = [
       "Botões de editar e apagar em cada movimentação, com ajuste automático do estoque.",
       "Sugestão automática de SKU por setor ao cadastrar um produto novo.",
       "Aviso de SKUs duplicados na aba Produtos.",
+      "Modal \"Novidades\" no cabeçalho, listando as atualizações mais recentes direto no app.",
+      "Ordenação clicável nas colunas da tabela de Pedidos.",
+      "Classificação \"Matriz\" / \"Local\" por item em Pedidos, com filtro na tela — só os itens marcados \"Matriz\" entram no pedido enviado pra Umuarama.",
+      "Campo de origem da entrada (Comprado localmente / Veio da matriz) ao registrar uma entrada em Movimentações.",
+      "Botão \"PDF (Local)\" em Pedidos, pra gerar um documento separado só com os itens de compra local.",
+      "Botão \"Redefinir p/ Matriz\" em Pedidos, pra voltar todos os itens de uma filial pra \"Matriz\" de uma vez.",
     ],
     fixed: [
       "Validação de SKU que impedia salvar um produto com SKU legitimamente reaproveitado em outra filial.",
@@ -386,7 +392,7 @@ export default function ControleEstoque() {
   const [importModal, setImportModal] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [convertModal, setConvertModal] = useState(null);
-  const [printTarget, setPrintTarget] = useState(null); // null | cityName | 'all'
+  const [printTarget, setPrintTarget] = useState(null); // null | { city: cityName | 'all', source: 'matriz' | 'local' }
   const [showChangelog, setShowChangelog] = useState(false);
 
   useEffect(() => {
@@ -716,7 +722,14 @@ export default function ControleEstoque() {
       });
       const nextMovements = movements.map((m) =>
         m.id === original.id
-          ? { ...m, productId: updates.productId, type: updates.type, quantity: newQty, note: updates.note }
+          ? {
+              ...m,
+              productId: updates.productId,
+              type: updates.type,
+              quantity: newQty,
+              note: updates.note,
+              ...(updates.hasOwnProperty("source") ? { source: updates.source } : {}),
+            }
           : m
       );
       persist(nextProducts, nextMovements);
@@ -799,6 +812,22 @@ export default function ControleEstoque() {
         orderUnitsPerPackage: isPackaged ? Number(d.factor) || 0 : null,
       };
     });
+    persist(nextProducts, movements);
+  }
+
+  // Marca se um produto deve entrar no pedido enviado à matriz (Umuarama)
+  // ou se é item de compra local — usado pra filtrar o que sai no PDF/texto
+  // do pedido. Persiste na hora, sem depender do botão "Salvar pedido".
+  function updateProductOrderSource(productId, source) {
+    const nextProducts = products.map((p) => (p.id === productId ? { ...p, orderSource: source } : p));
+    persist(nextProducts, movements);
+  }
+
+  // Redefine a origem de todos os produtos de uma filial de volta pra
+  // "matriz" de uma vez — evita ter que clicar item por item quando só
+  // algumas exceções tinham virado compra local.
+  function resetOrderSourceToMatriz(cityName) {
+    const nextProducts = products.map((p) => (p.city === cityName ? { ...p, orderSource: "matriz" } : p));
     persist(nextProducts, movements);
   }
 
@@ -989,7 +1018,14 @@ export default function ControleEstoque() {
 
       <div style={{ background: "#fff", border: `1px solid ${TOKENS.line}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 24, minHeight: 480 }}>
         {tab === "pedidos" ? (
-          <PedidosTab products={products} city={city} onSave={updateOrderQuantities} onRequestPrint={setPrintTarget} />
+          <PedidosTab
+            products={products}
+            city={city}
+            onSave={updateOrderQuantities}
+            onRequestPrint={setPrintTarget}
+            onChangeSource={updateProductOrderSource}
+            onResetSource={resetOrderSourceToMatriz}
+          />
         ) : tab === "transferencias" ? (
           <TransferenciasTab products={products} movements={movements} onTransfer={transferStock} />
         ) : cityProducts.length === 0 ? (
@@ -1132,7 +1168,9 @@ export default function ControleEstoque() {
 
 function PrintSheet({ products, target }) {
   if (!target) return null;
-  const cities = target === "all" ? CITIES : [target];
+  const targetCity = target.city;
+  const source = target.source || "matriz";
+  const cities = targetCity === "all" ? CITIES : [targetCity];
   const dateStr = new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
   return (
     <div className="print-sheet" style={{ fontFamily: "'Inter', sans-serif", color: "#1a1a1a", padding: "24px" }}>
@@ -1152,13 +1190,18 @@ function PrintSheet({ products, target }) {
       <div style={{ display: "flex", alignItems: "center", gap: 16, borderBottom: "2px solid #1a1a1a", paddingBottom: 16, marginBottom: 20 }}>
         <img src={LOGO_PRINT} alt="Logo" style={{ height: 56, objectFit: "contain" }} />
         <div>
-          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 18 }}>Pedido de compra</div>
-          <div style={{ fontSize: 12, color: "#555" }}>{target === "all" ? "Todas as filiais" : target} · gerado em {dateStr}</div>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 18 }}>
+            {source === "local" ? "Compra local" : "Pedido de compra"}
+          </div>
+          <div style={{ fontSize: 12, color: "#555" }}>
+            {targetCity === "all" ? "Todas as filiais" : targetCity} · gerado em {dateStr}
+            {source === "local" ? " · itens de compra local (não enviar à matriz)" : ""}
+          </div>
         </div>
       </div>
 
       {cities.map((c) => {
-        const items = products.filter((p) => p.city === c && (Number(p.orderQty) || 0) > 0);
+        const items = products.filter((p) => p.city === c && (Number(p.orderQty) || 0) > 0 && (p.orderSource || "matriz") === source);
         const total = items.reduce((s, p) => s + (Number(p.orderQty) || 0), 0);
         return (
           <div key={c} style={{ marginBottom: 24 }}>
@@ -1204,8 +1247,11 @@ function suggestedQty(p) {
   return Math.max(0, p.minStock - p.quantity);
 }
 
+// Só entra no pedido que vai pra matriz o que tiver quantidade definida E
+// estiver marcado como "Matriz" — itens marcados como "Local" são comprados
+// por fora e não devem aparecer no pedido enviado pra Umuarama.
 function buildOrderText(cityName, cityProducts, drafts) {
-  const items = cityProducts.filter((p) => (Number(drafts[p.id]?.qty) || 0) > 0);
+  const items = cityProducts.filter((p) => (Number(drafts[p.id]?.qty) || 0) > 0 && (p.orderSource || "matriz") === "matriz");
   const dateStr = new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
   let text = `PEDIDO DE COMPRA - ${cityName.toUpperCase()}\nData: ${dateStr}\n\n`;
   if (items.length === 0) {
@@ -1237,7 +1283,7 @@ function downloadTextFile(filename, text) {
   URL.revokeObjectURL(url);
 }
 
-function PedidosTab({ products, city, onSave, onRequestPrint }) {
+function PedidosTab({ products, city, onSave, onRequestPrint, onChangeSource, onResetSource }) {
   const [drafts, setDrafts] = useState(() =>
     Object.fromEntries(
       products.map((p) => [
@@ -1253,6 +1299,8 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
   );
   const [dirty, setDirty] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [sort, setSort] = useState({ key: null, dir: "asc" });
+  const [sourceFilter, setSourceFilter] = useState("todos");
 
   // Recalcula a quantidade real (na unidade-base do produto, hoje sempre
   // UN) a partir do que foi digitado em "Tipo" + "Qtd." — se o tipo
@@ -1270,18 +1318,54 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
     setDirty(true);
   }
 
-  const cityProducts = products.filter((p) => p.city === city).sort((a, b) => {
-    const aLow = a.quantity <= a.minStock ? 0 : 1;
-    const bLow = b.quantity <= b.minStock ? 0 : 1;
-    if (aLow !== bLow) return aLow - bLow;
-    return a.name.localeCompare(b.name);
-  });
-  const cityTotal = cityProducts.reduce((s, p) => s + (Number(drafts[p.id]?.qty) || 0), 0);
+  function toggleSort(key) {
+    setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  }
+
+  // Lista completa da filial, sem o filtro de origem — usada nos totais e
+  // nas ações de "Sugerir"/"Limpar"/copiar/baixar/gerar PDF, que devem valer
+  // pra tudo independente do que está sendo exibido na tabela no momento.
+  const cityProductsAll = products.filter((p) => p.city === city);
+
+  const cityProductsBySource =
+    sourceFilter === "todos"
+      ? cityProductsAll
+      : cityProductsAll.filter((p) => (p.orderSource || "matriz") === sourceFilter);
+
+  const cityProducts = useMemo(() => {
+    if (!sort.key) {
+      return [...cityProductsBySource].sort((a, b) => {
+        const aLow = a.quantity <= a.minStock ? 0 : 1;
+        const bLow = b.quantity <= b.minStock ? 0 : 1;
+        if (aLow !== bLow) return aLow - bLow;
+        return a.name.localeCompare(b.name);
+      });
+    }
+    const col = PEDIDOS_COLUMNS.find((c) => c.key === sort.key);
+    const mult = sort.dir === "asc" ? 1 : -1;
+    return [...cityProductsBySource].sort((a, b) => {
+      const va = a[sort.key];
+      const vb = b[sort.key];
+      if (col.type === "number") return ((Number(va) || 0) - (Number(vb) || 0)) * mult;
+      return String(va || "").localeCompare(String(vb || ""), "pt-BR") * mult;
+    });
+  }, [cityProductsBySource, sort]);
+
+  const matrizCount = cityProductsAll.filter((p) => (p.orderSource || "matriz") === "matriz").length;
+  const localCount = cityProductsAll.filter((p) => (p.orderSource || "matriz") === "local").length;
+  const matrizTotal = cityProductsAll.reduce(
+    (s, p) => ((p.orderSource || "matriz") === "matriz" ? s + (Number(drafts[p.id]?.qty) || 0) : s),
+    0
+  );
+  const localTotal = cityProductsAll.reduce(
+    (s, p) => ((p.orderSource || "matriz") === "local" ? s + (Number(drafts[p.id]?.qty) || 0) : s),
+    0
+  );
 
   function suggestCity() {
     setDrafts((d) => {
       const next = { ...d };
-      cityProducts.forEach((p) => {
+      cityProductsAll.forEach((p) => {
         const q = suggestedQty(p);
         next[p.id] = { qty: q, unit: p.unit, packageQty: q, factor: "" };
       });
@@ -1293,7 +1377,7 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
   function clearCity() {
     setDrafts((d) => {
       const next = { ...d };
-      cityProducts.forEach((p) => { next[p.id] = { qty: 0, unit: p.unit, packageQty: 0, factor: "" }; });
+      cityProductsAll.forEach((p) => { next[p.id] = { qty: 0, unit: p.unit, packageQty: 0, factor: "" }; });
       return next;
     });
     setDirty(true);
@@ -1305,7 +1389,7 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
   }
 
   async function copyOrder() {
-    const text = buildOrderText(city, cityProducts, drafts);
+    const text = buildOrderText(city, cityProductsAll, drafts);
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
@@ -1316,15 +1400,19 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
   }
 
   function downloadOrder() {
-    const text = buildOrderText(city, cityProducts, drafts);
+    const text = buildOrderText(city, cityProductsAll, drafts);
     const safeName = city.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
     downloadTextFile(`pedido-${safeName}-${new Date().toISOString().slice(0, 10)}.txt`, text);
   }
 
-  function generatePdf() {
+  function generatePdf(source) {
     onSave(drafts);
     setDirty(false);
-    onRequestPrint(city);
+    onRequestPrint({ city, source });
+  }
+
+  function resetToMatriz() {
+    onResetSource(city);
   }
 
   return (
@@ -1333,11 +1421,13 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
         <div>
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16 }}>Pedido de compra — {city}</div>
           <p style={{ fontSize: 12, color: TOKENS.inkLight, margin: "4px 0 0" }}>
-            Defina quanto pedir de cada item. Use "Sugerir" para preencher automaticamente com base no estoque mínimo.
+            Defina quanto pedir de cada item e marque se vai pra <strong>Matriz</strong> ou se é <strong>compra local</strong>. Só os itens marcados "Matriz" entram no pedido enviado pra Umuarama.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <span className="est-mono" style={{ fontSize: 12, color: TOKENS.inkLight }}>Total a pedir: <strong style={{ color: TOKENS.charcoal }}>{cityTotal}</strong> un.</span>
+          <span className="est-mono" style={{ fontSize: 12, color: TOKENS.inkLight }}>
+            Matriz: <strong style={{ color: TOKENS.charcoal }}>{matrizTotal}</strong> un. · Local: <strong style={{ color: TOKENS.charcoal }}>{localTotal}</strong> un.
+          </span>
           <button className="est-btn" style={{ background: dirty ? TOKENS.ink : TOKENS.paperDark, color: dirty ? "#fff" : TOKENS.inkLight }} onClick={saveAll} disabled={!dirty}>
             Salvar pedido
           </button>
@@ -1346,12 +1436,33 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
 
       <div className="est-card" style={{ padding: 16 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <MapPin size={14} color={TOKENS.inkLight} />
             <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 14 }}>{city}</span>
-            <span className="est-mono" style={{ fontSize: 11, color: TOKENS.inkLight }}>{cityProducts.length} itens · {cityTotal} un. a pedir</span>
+            <div style={{ display: "flex", gap: 4 }}>
+              {[
+                { key: "todos", label: `Todos (${cityProductsAll.length})` },
+                { key: "matriz", label: `Matriz (${matrizCount})` },
+                { key: "local", label: `Local (${localCount})` },
+              ].map((f) => (
+                <button
+                  key={f.key}
+                  type="button"
+                  onClick={() => setSourceFilter(f.key)}
+                  className="est-mono"
+                  style={{
+                    fontSize: 11, padding: "4px 10px", borderRadius: 20, cursor: "pointer",
+                    border: `1px solid ${TOKENS.line}`,
+                    background: sourceFilter === f.key ? TOKENS.ink : "#fff",
+                    color: sourceFilter === f.key ? "#fff" : TOKENS.inkLight,
+                  }}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
           </div>
-          {cityProducts.length > 0 && (
+          {cityProductsAll.length > 0 && (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               <button type="button" className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal, padding: "6px 10px", fontSize: 12 }} onClick={suggestCity}>
                 <Wand2 size={12} /> Sugerir
@@ -1359,26 +1470,64 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
               <button type="button" className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal, padding: "6px 10px", fontSize: 12 }} onClick={clearCity}>
                 Limpar
               </button>
+              {localCount > 0 && (
+                <button
+                  type="button"
+                  className="est-btn"
+                  style={{ background: TOKENS.paperDark, color: TOKENS.charcoal, padding: "6px 10px", fontSize: 12 }}
+                  onClick={resetToMatriz}
+                  title="Marca todos os itens dessa filial de volta como Matriz"
+                >
+                  <RotateCcw size={12} /> Redefinir p/ Matriz
+                </button>
+              )}
               <button type="button" className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal, padding: "6px 10px", fontSize: 12 }} onClick={copyOrder}>
                 {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? "Copiado" : "Copiar"}
               </button>
               <button type="button" className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal, padding: "6px 10px", fontSize: 12 }} onClick={downloadOrder}>
                 <Download size={12} /> .txt
               </button>
-              <button type="button" className="est-btn" style={{ background: TOKENS.ink, color: "#fff", padding: "6px 10px", fontSize: 12 }} onClick={generatePdf}>
-                <FileText size={12} /> PDF
+              <button type="button" className="est-btn" style={{ background: TOKENS.ink, color: "#fff", padding: "6px 10px", fontSize: 12 }} onClick={() => generatePdf("matriz")}>
+                <FileText size={12} /> PDF (Matriz)
               </button>
+              {localCount > 0 && (
+                <button type="button" className="est-btn" style={{ background: TOKENS.amber, color: TOKENS.ink, padding: "6px 10px", fontSize: 12 }} onClick={() => generatePdf("local")}>
+                  <FileText size={12} /> PDF (Local)
+                </button>
+              )}
             </div>
           )}
         </div>
 
-        {cityProducts.length === 0 ? (
+        {cityProductsAll.length === 0 ? (
           <p style={{ fontSize: 12, color: TOKENS.inkLight }}>Sem produtos cadastrados nesta filial ainda.</p>
+        ) : cityProducts.length === 0 ? (
+          <p style={{ fontSize: 12, color: TOKENS.inkLight }}>Nenhum item nesse filtro.</p>
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table className="est-table">
               <thead>
-                <tr><th>Produto</th><th>Setor</th><th>Estoque</th><th>Mínimo</th><th>Qtd. a pedir</th></tr>
+                <tr>
+                  {PEDIDOS_COLUMNS.map((col) => {
+                    const active = sort.key === col.key;
+                    const Icon = active ? (sort.dir === "asc" ? ChevronUp : ChevronDown) : ChevronsUpDown;
+                    return (
+                      <th
+                        key={col.key}
+                        onClick={() => toggleSort(col.key)}
+                        style={{ cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" }}
+                        title="Clique para ordenar"
+                      >
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                          {col.label}
+                          <Icon size={12} color={active ? TOKENS.ink : TOKENS.line} />
+                        </span>
+                      </th>
+                    );
+                  })}
+                  <th>Qtd. a pedir</th>
+                  <th>Origem</th>
+                </tr>
               </thead>
               <tbody>
                 {cityProducts.map((p) => {
@@ -1401,6 +1550,9 @@ function PedidosTab({ products, city, onSave, onRequestPrint }) {
                           onFactorChange={(v) => updateDraft(p, { factor: v })}
                           label="Qtd. a pedir"
                         />
+                      </td>
+                      <td>
+                        <OrderSourceToggle value={p.orderSource} onChange={(v) => onChangeSource(p.id, v)} />
                       </td>
                     </tr>
                   );
@@ -1779,6 +1931,13 @@ const PRODUTOS_COLUMNS = [
   { key: "unitPrice", label: "Preço", type: "number" },
 ];
 
+const PEDIDOS_COLUMNS = [
+  { key: "name", label: "Produto", type: "text" },
+  { key: "category", label: "Setor", type: "text" },
+  { key: "quantity", label: "Estoque", type: "number" },
+  { key: "minStock", label: "Mínimo", type: "number" },
+];
+
 function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setCatFilter, onNew, onEdit, onDelete, onConvert }) {
   const duplicateGroups = findDuplicateSkus(allProducts || products);
   const [sort, setSort] = useState({ key: null, dir: "asc" });
@@ -1932,6 +2091,11 @@ function MovimentacoesTab({ products, movements, onEntrada, onSaida, onImportar,
                     }}>
                       {isIn ? "ENTRADA ▲" : "SAÍDA ▼"}
                     </span>
+                    {isIn && m.source && (
+                      <div style={{ fontSize: 10, color: TOKENS.inkLight, marginTop: 4 }}>
+                        {m.source === "matriz" ? "via Matriz" : "compra local"}
+                      </div>
+                    )}
                   </td>
                   <td>{p ? p.name : "Produto removido"}</td>
                   <td className="est-mono">
@@ -2199,6 +2363,7 @@ function MovementModal({ type, products, onSave, onClose }) {
   const [quantity, setQuantity] = useState(1);
   const [unitType, setUnitType] = useState(products[0]?.unit || "UN");
   const [factor, setFactor] = useState("");
+  const [source, setSource] = useState("");
   const [note, setNote] = useState("");
   const isIn = type === "entrada";
   const selected = products.find((p) => p.id === productId);
@@ -2219,6 +2384,7 @@ function MovementModal({ type, products, onSave, onClose }) {
   function submit(e) {
     e.preventDefault();
     if (!productId || totalQty <= 0) return;
+    if (isIn && !source) return;
     onSave({
       productId,
       type,
@@ -2227,6 +2393,7 @@ function MovementModal({ type, products, onSave, onClose }) {
       ...(needsFactor
         ? { packageUnit: unitType, packageQty: Number(quantity), unitsPerPackage: Number(factor) }
         : {}),
+      ...(isIn ? { source } : {}),
     });
   }
 
@@ -2255,6 +2422,15 @@ function MovementModal({ type, products, onSave, onClose }) {
             factor={factor}
             onFactorChange={setFactor}
           />
+          {isIn && (
+            <Field label="Origem da entrada">
+              <select className="est-input" style={{ width: "100%" }} value={source} onChange={(e) => setSource(e.target.value)} required>
+                <option value="" disabled>Selecione…</option>
+                <option value="local">Comprado localmente</option>
+                <option value="matriz">Veio da matriz (Umuarama)</option>
+              </select>
+            </Field>
+          )}
           {selected && !isIn && totalQty > selected.quantity && (
             <div style={{ fontSize: 12, color: TOKENS.rustDark, background: `${TOKENS.rust}12`, padding: "6px 10px", borderRadius: 6 }}>
               Estoque atual: {selected.quantity} {selected.unit}. A saída deixará o saldo ajustado para zero.
@@ -2267,7 +2443,7 @@ function MovementModal({ type, products, onSave, onClose }) {
 
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
           <button type="button" className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={onClose}>Cancelar</button>
-          <button type="submit" className="est-btn" style={{ background: isIn ? TOKENS.teal : TOKENS.rust, color: "#fff" }}>Confirmar</button>
+          <button type="submit" className="est-btn" style={{ background: isIn ? TOKENS.teal : TOKENS.rust, color: "#fff" }} disabled={isIn && !source}>Confirmar</button>
         </div>
       </form>
     </div>
@@ -2280,6 +2456,7 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
   const [productId, setProductId] = useState(movement.productId);
   const [type, setType] = useState(movement.type);
   const [quantity, setQuantity] = useState(movement.quantity);
+  const [source, setSource] = useState(movement.source || "");
   const [note, setNote] = useState(movement.note || "");
   const isIn = type === "entrada";
   const selected = cityProducts.find((p) => p.id === productId);
@@ -2287,7 +2464,14 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
   function submit(e) {
     e.preventDefault();
     if (!productId || Number(quantity) <= 0) return;
-    onSave({ productId, type, quantity: Number(quantity), note });
+    if (isIn && !isTransfer && !source) return;
+    onSave({
+      productId,
+      type,
+      quantity: Number(quantity),
+      note,
+      ...(isIn && !isTransfer ? { source } : {}),
+    });
   }
 
   return (
@@ -2335,6 +2519,15 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
           <Field label={`Quantidade${selected ? ` (${selected.unit})` : ""}`}>
             <input className="est-input" style={{ width: "100%" }} type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} required />
           </Field>
+          {isIn && !isTransfer && (
+            <Field label="Origem da entrada">
+              <select className="est-input" style={{ width: "100%" }} value={source} onChange={(e) => setSource(e.target.value)} required>
+                <option value="" disabled>Selecione…</option>
+                <option value="local">Comprado localmente</option>
+                <option value="matriz">Veio da matriz (Umuarama)</option>
+              </select>
+            </Field>
+          )}
           <Field label="Observação">
             <input className="est-input" style={{ width: "100%" }} value={note} onChange={(e) => setNote(e.target.value)} />
           </Field>
@@ -2346,7 +2539,7 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
           </button>
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={onClose}>Cancelar</button>
-            <button type="submit" className="est-btn" style={{ background: isIn ? TOKENS.teal : TOKENS.rust, color: "#fff" }}>Salvar alterações</button>
+            <button type="submit" className="est-btn" style={{ background: isIn ? TOKENS.teal : TOKENS.rust, color: "#fff" }} disabled={isIn && !isTransfer && !source}>Salvar alterações</button>
           </div>
         </div>
       </form>
@@ -2624,6 +2817,39 @@ function ImportModal({ products, city, onImport, onClose }) {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// Alternador compacto "Matriz" / "Local" usado na aba Pedidos pra marcar se
+// aquele item deve entrar no pedido enviado à matriz (Umuarama) ou se vai
+// ser comprado localmente, por fora.
+function OrderSourceToggle({ value, onChange }) {
+  const source = value || "matriz";
+  return (
+    <div style={{ display: "inline-flex", borderRadius: 20, overflow: "hidden", border: `1px solid ${TOKENS.line}`, flexShrink: 0 }}>
+      <button
+        type="button"
+        onClick={() => onChange("matriz")}
+        style={{
+          fontSize: 11, fontWeight: 600, padding: "5px 10px", border: "none", cursor: "pointer",
+          background: source === "matriz" ? TOKENS.ink : "#fff",
+          color: source === "matriz" ? "#fff" : TOKENS.inkLight,
+        }}
+      >
+        Matriz
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("local")}
+        style={{
+          fontSize: 11, fontWeight: 600, padding: "5px 10px", border: "none", cursor: "pointer",
+          background: source === "local" ? TOKENS.amber : "#fff",
+          color: source === "local" ? TOKENS.ink : TOKENS.inkLight,
+        }}
+      >
+        Local
+      </button>
     </div>
   );
 }

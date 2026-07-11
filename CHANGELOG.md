@@ -11,6 +11,12 @@ Todas as alterações relevantes do projeto **Controle de Estoque** são documen
 - Botões de editar e apagar em cada movimentação, com ajuste automático do estoque (inclusive nos dois lados de uma transferência vinculada).
 - Sugestão automática de SKU por setor ao cadastrar um produto novo.
 - Aviso de SKUs duplicados na aba Produtos, quando o mesmo código está sendo usado por produtos diferentes.
+- Modal "Novidades" no cabeçalho, listando as atualizações mais recentes direto no app.
+- Ordenação clicável nas colunas da tabela de Pedidos (Produto, Setor, Estoque, Mínimo).
+- Classificação "Matriz" / "Local" por item em Pedidos, com filtro na tela: só os itens marcados "Matriz" entram no pedido enviado pra Umuarama (PDF, texto copiado e .txt); itens "Local" ficam de fora, pra serem comprados por conta própria.
+- Campo de origem da entrada (Comprado localmente / Veio da matriz) ao registrar uma entrada em Movimentações, exibido no histórico.
+- Botão "PDF (Local)" em Pedidos, gerando um documento separado só com os itens marcados como compra local.
+- Botão "Redefinir p/ Matriz" em Pedidos, pra voltar todos os itens de uma filial pra "Matriz" de uma vez, sem precisar clicar item por item.
 
 ### Corrigido
 - Validação de SKU que impedia salvar um produto com um SKU legitimamente reaproveitado em outra filial (ex: editar "Chá" em Palotina).
