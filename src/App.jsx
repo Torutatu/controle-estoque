@@ -8,7 +8,7 @@ import {
   X, Search, LayoutGrid, ClipboardList, FileBarChart,
   ArrowUpCircle, ArrowDownCircle, Boxes, MapPin, ShoppingCart, Wand2,
   Copy, Download, Check, FileText, Upload, FileSpreadsheet, AlertCircle,
-  ArrowLeftRight,
+  ArrowLeftRight, ChevronUp, ChevronDown, ChevronsUpDown,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { storage, readLegacyLocalStorage } from "./storage";
@@ -194,6 +194,135 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+function normalizeSku(sku) {
+  return (sku || "").trim().toLowerCase();
+}
+
+// Agrupa produtos (de qualquer filial) por SKU normalizado e devolve só os
+// grupos com um problema de verdade: o mesmo SKU usado por produtos com
+// nomes diferentes (colisão), ou repetido mais de uma vez na MESMA filial.
+// O mesmo SKU com o mesmo nome em filiais diferentes é o comportamento
+// normal da replicação de catálogo entre filiais, então não é acusado.
+function findDuplicateSkus(products) {
+  const bySku = {};
+  products.forEach((p) => {
+    const key = normalizeSku(p.sku);
+    if (!key) return;
+    if (!bySku[key]) bySku[key] = [];
+    bySku[key].push(p);
+  });
+
+  return Object.values(bySku).filter((group) => {
+    const distinctNames = new Set(group.map((p) => p.name.trim().toLowerCase()));
+    const seenCityName = new Set();
+    let sameCityDuplicate = false;
+    group.forEach((p) => {
+      const key = `${p.city}::${p.name.trim().toLowerCase()}`;
+      if (seenCityName.has(key)) sameCityDuplicate = true;
+      seenCityName.add(key);
+    });
+    return distinctNames.size > 1 || sameCityDuplicate;
+  });
+}
+
+// Sugere o próximo SKU sequencial pro setor escolhido (ex.: Cozinha →
+// COZ-00x), olhando o maior número já usado nesse prefixo entre todos os
+// produtos cadastrados (qualquer filial).
+function suggestSku(category, products) {
+  const prefix = CAT_PREFIX[category];
+  if (!prefix) return "";
+  const re = new RegExp(`^${prefix}-(\\d+)$`, "i");
+  let max = 0;
+  products.forEach((p) => {
+    const m = re.exec((p.sku || "").trim());
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  });
+  return `${prefix}-${String(max + 1).padStart(3, "0")}`;
+}
+
+// Resolve conflitos reais de SKU (mesmo SKU usado por produtos com nomes
+// diferentes, ou duas linhas iguais na mesma filial), usando Toledo como
+// referência: quando o SKU também existe em Toledo, o produto de Toledo
+// mantém esse SKU e os outros ganham um SKU novo, sem conflito. Sem Toledo
+// no grupo, mantém o primeiro produto encontrado e renomeia os demais.
+// Produtos com o mesmo SKU e o mesmo nome em filiais diferentes (replicação
+// normal do catálogo) não são mexidos.
+function resolveSkuConflicts(products) {
+  const bySku = {};
+  products.forEach((p) => {
+    const key = normalizeSku(p.sku);
+    if (!key) return;
+    if (!bySku[key]) bySku[key] = [];
+    bySku[key].push(p);
+  });
+
+  // Números de SKU já em uso por prefixo, pra nunca sugerir algo que colida
+  // com um SKU existente (ou com outra renomeação feita nesta mesma passada).
+  const usedByPrefix = {};
+  products.forEach((p) => {
+    const m = /^([A-Za-z]+)-(\d+)$/.exec((p.sku || "").trim());
+    if (m) {
+      const prefix = m[1].toUpperCase();
+      usedByPrefix[prefix] = usedByPrefix[prefix] || new Set();
+      usedByPrefix[prefix].add(parseInt(m[2], 10));
+    }
+  });
+
+  function nextSkuFor(category) {
+    const prefix = CAT_PREFIX[category] || "PRD";
+    const used = usedByPrefix[prefix] || new Set();
+    let n = 1;
+    while (used.has(n)) n++;
+    used.add(n);
+    usedByPrefix[prefix] = used;
+    return `${prefix}-${String(n).padStart(3, "0")}`;
+  }
+
+  const renames = {}; // id -> novo sku
+
+  Object.values(bySku).forEach((group) => {
+    const byName = {};
+    group.forEach((p) => {
+      const key = p.name.trim().toLowerCase();
+      (byName[key] = byName[key] || []).push(p);
+    });
+    const distinctNames = Object.keys(byName);
+
+    const seenCityName = new Set();
+    let hasSameCityDuplicate = false;
+    group.forEach((p) => {
+      const key = `${p.city}::${p.name.trim().toLowerCase()}`;
+      if (seenCityName.has(key)) hasSameCityDuplicate = true;
+      seenCityName.add(key);
+    });
+
+    if (distinctNames.length <= 1 && !hasSameCityDuplicate) return; // ok, replicação normal entre filiais
+
+    // Escolhe o "dono" do SKU original: o nome que tiver produto em
+    // Toledo, ou o primeiro nome encontrado se nenhum for de Toledo.
+    let ownerNameKey = distinctNames.find((key) => byName[key].some((p) => p.city === "Toledo"));
+    if (!ownerNameKey) ownerNameKey = distinctNames[0];
+
+    // Dentro do nome "dono", mantém só o primeiro produto de cada filial
+    // com o SKU original — linhas redundantes na mesma filial também
+    // ganham SKU novo.
+    const ownerCitySeen = new Set();
+    group.forEach((p) => {
+      const nameKey = p.name.trim().toLowerCase();
+      const isOwnerName = nameKey === ownerNameKey;
+      const duplicateInSameCity = isOwnerName && ownerCitySeen.has(p.city);
+      if (isOwnerName) ownerCitySeen.add(p.city);
+
+      if (!isOwnerName || duplicateInSameCity) {
+        renames[p.id] = nextSkuFor(p.category);
+      }
+    });
+  });
+
+  if (Object.keys(renames).length === 0) return products;
+  return products.map((p) => (renames[p.id] ? { ...p, sku: renames[p.id] } : p));
+}
+
 export default function ControleEstoque() {
   const [products, setProducts] = useState(null);
   const [movements, setMovements] = useState(null);
@@ -204,6 +333,8 @@ export default function ControleEstoque() {
   const [city, setCity] = useState("Toledo");
   const [productModal, setProductModal] = useState(null);
   const [moveModal, setMoveModal] = useState(null);
+  const [moveEditModal, setMoveEditModal] = useState(null);
+  const [confirmDeleteMovement, setConfirmDeleteMovement] = useState(null);
   const [importModal, setImportModal] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [printTarget, setPrintTarget] = useState(null); // null | cityName | 'all'
@@ -291,21 +422,36 @@ export default function ControleEstoque() {
           const parsed = JSON.parse(raw);
           let migrated = (parsed.products || []).map((p) => ({ orderQty: 0, ...p }));
           const movs = parsed.movements || [];
+          let needsSave = migratingFromLocal;
           // Replica o catálogo base de Toledo (sem estoque) para as demais
           // filiais uma única vez — só roda de novo se ainda não tiver rodado.
           if (!parsed.catalogReplicated) {
             migrated = replicateCatalogToOtherCities(migrated);
+            needsSave = true;
+          }
+          // Resolve conflitos de SKU (mesmo código usado por produtos
+          // diferentes) uma única vez, usando Toledo como referência —
+          // também só roda se ainda não tiver rodado.
+          if (!parsed.skuConflictsResolved) {
+            migrated = resolveSkuConflicts(migrated);
+            needsSave = true;
           }
           setProducts(migrated);
           setMovements(movs);
-          if (!parsed.catalogReplicated || migratingFromLocal) {
-            await storage.set("estoque-data-v2", JSON.stringify({ products: migrated, movements: movs, catalogReplicated: true }));
+          if (needsSave) {
+            await storage.set(
+              "estoque-data-v2",
+              JSON.stringify({ products: migrated, movements: movs, catalogReplicated: true, skuConflictsResolved: true })
+            );
           }
         } else {
           const seeded = replicateCatalogToOtherCities(buildSeedProducts());
           setProducts(seeded);
           setMovements([]);
-          await storage.set("estoque-data-v2", JSON.stringify({ products: seeded, movements: [], catalogReplicated: true }));
+          await storage.set(
+            "estoque-data-v2",
+            JSON.stringify({ products: seeded, movements: [], catalogReplicated: true, skuConflictsResolved: true })
+          );
         }
       } catch (e) {
         setProducts(buildSeedProducts());
@@ -319,7 +465,10 @@ export default function ControleEstoque() {
     setProducts(nextProducts);
     setMovements(nextMovements);
     try {
-      await storage.set("estoque-data-v2", JSON.stringify({ products: nextProducts, movements: nextMovements, catalogReplicated: true }));
+      await storage.set(
+        "estoque-data-v2",
+        JSON.stringify({ products: nextProducts, movements: nextMovements, catalogReplicated: true, skuConflictsResolved: true })
+      );
     } catch (e) {
       console.error("Falha ao salvar", e);
     }
@@ -353,14 +502,25 @@ export default function ControleEstoque() {
   }
 
   // Transfere estoque de um produto de uma filial pra outra: dá baixa no
-  // produto de origem, soma no produto correspondente (mesmo SKU) na filial
-  // de destino — criando esse produto no destino se ainda não existir — e
-  // registra uma saída + uma entrada vinculadas (mesmo transferId).
+  // produto de origem, soma no produto correspondente na filial de destino
+  // — criando esse produto no destino se ainda não existir — e registra uma
+  // saída + uma entrada vinculadas (mesmo transferId).
+  //
+  // Só reaproveita um produto já existente no destino se SKU **e** nome
+  // baterem ao mesmo tempo. SKU sozinho não é garantia (pode ter sido
+  // reaproveitado manualmente em outro item), então qualquer divergência
+  // faz o app criar um produto novo no destino em vez de arriscar somar
+  // estoque num item errado.
   function transferStock({ fromCity, toCity, product, quantity }) {
     const now = new Date().toISOString();
     const transferId = uid();
 
-    const existingDest = products.find((p) => p.city === toCity && p.sku === product.sku);
+    const existingDest = products.find(
+      (p) =>
+        p.city === toCity &&
+        p.sku === product.sku &&
+        p.name.trim().toLowerCase() === product.name.trim().toLowerCase()
+    );
     const destId = existingDest ? existingDest.id : uid();
 
     let nextProducts = products.map((p) => {
@@ -413,6 +573,82 @@ export default function ControleEstoque() {
     };
 
     persist(nextProducts, [inMovement, outMovement, ...movements]);
+  }
+
+  // Edita uma movimentação já registrada, ajustando o estoque pra refletir
+  // a diferença. Se ela for parte de uma transferência (tem transferId), só
+  // a quantidade e a observação podem mudar, e a quantidade é ajustada nos
+  // dois lados (origem e destino) junto, pra não desbalancear a transferência.
+  function editMovement(original, updates) {
+    const linked = original.transferId
+      ? movements.find((m) => m.transferId === original.transferId && m.id !== original.id)
+      : null;
+    const newQty = Number(updates.quantity);
+
+    if (linked) {
+      const deltaOut = newQty - original.quantity;
+      const nextProducts = products.map((p) => {
+        if (p.id === original.productId) {
+          const delta = original.type === "saida" ? -deltaOut : deltaOut;
+          return { ...p, quantity: Math.max(0, p.quantity + delta) };
+        }
+        if (p.id === linked.productId) {
+          const delta = linked.type === "saida" ? -deltaOut : deltaOut;
+          return { ...p, quantity: Math.max(0, p.quantity + delta) };
+        }
+        return p;
+      });
+      const nextMovements = movements.map((m) => {
+        if (m.id === original.id) return { ...m, quantity: newQty, note: updates.note };
+        if (m.id === linked.id) return { ...m, quantity: newQty };
+        return m;
+      });
+      persist(nextProducts, nextMovements);
+    } else {
+      let nextProducts = products.map((p) => {
+        if (p.id !== original.productId) return p;
+        const undo = original.type === "entrada" ? -original.quantity : original.quantity;
+        return { ...p, quantity: Math.max(0, p.quantity + undo) };
+      });
+      nextProducts = nextProducts.map((p) => {
+        if (p.id !== updates.productId) return p;
+        const apply = updates.type === "entrada" ? newQty : -newQty;
+        return { ...p, quantity: Math.max(0, p.quantity + apply) };
+      });
+      const nextMovements = movements.map((m) =>
+        m.id === original.id
+          ? { ...m, productId: updates.productId, type: updates.type, quantity: newQty, note: updates.note }
+          : m
+      );
+      persist(nextProducts, nextMovements);
+    }
+    setMoveEditModal(null);
+  }
+
+  // Apaga uma movimentação e desfaz o efeito dela no estoque. Se ela for
+  // parte de uma transferência, apaga e desfaz os dois lados juntos.
+  function deleteMovement(mv) {
+    const linked = mv.transferId
+      ? movements.find((m) => m.transferId === mv.transferId && m.id !== mv.id)
+      : null;
+
+    function undoOne(list, m) {
+      return list.map((p) => {
+        if (p.id !== m.productId) return p;
+        const undo = m.type === "entrada" ? -m.quantity : m.quantity;
+        return { ...p, quantity: Math.max(0, p.quantity + undo) };
+      });
+    }
+
+    let nextProducts = undoOne(products, mv);
+    if (linked) nextProducts = undoOne(nextProducts, linked);
+
+    const idsToRemove = linked ? [mv.id, linked.id] : [mv.id];
+    const nextMovements = movements.filter((m) => !idsToRemove.includes(m.id));
+
+    persist(nextProducts, nextMovements);
+    setConfirmDeleteMovement(null);
+    setMoveEditModal(null);
   }
 
   // rows: [{ productId?, newProduct?, quantity, note }]
@@ -650,6 +886,7 @@ export default function ControleEstoque() {
             {tab === "produtos" && (
               <ProdutosTab
                 products={filteredProducts}
+                allProducts={products}
                 search={search}
                 setSearch={setSearch}
                 catFilter={catFilter}
@@ -667,6 +904,8 @@ export default function ControleEstoque() {
                 onEntrada={() => setMoveModal({ type: "entrada" })}
                 onSaida={() => setMoveModal({ type: "saida" })}
                 onImportar={() => setImportModal(true)}
+                onEditMovement={(m) => setMoveEditModal(m)}
+                onDeleteMovement={(m) => setConfirmDeleteMovement(m)}
               />
             )}
 
@@ -681,6 +920,7 @@ export default function ControleEstoque() {
         <ProductModal
           product={productModal === "new" ? null : productModal}
           defaultCity={city}
+          allProducts={products}
           onSave={saveProduct}
           onClose={() => setProductModal(null)}
         />
@@ -693,6 +933,40 @@ export default function ControleEstoque() {
           onSave={addMovement}
           onClose={() => setMoveModal(null)}
         />
+      )}
+
+      {moveEditModal && (
+        <MovementEditModal
+          movement={moveEditModal}
+          linkedMovement={
+            moveEditModal.transferId
+              ? movements.find((m) => m.transferId === moveEditModal.transferId && m.id !== moveEditModal.id)
+              : null
+          }
+          products={products}
+          onSave={(updates) => editMovement(moveEditModal, updates)}
+          onDelete={() => { setConfirmDeleteMovement(moveEditModal); setMoveEditModal(null); }}
+          onClose={() => setMoveEditModal(null)}
+        />
+      )}
+
+      {confirmDeleteMovement && (
+        <div className="est-modal-overlay" onClick={() => setConfirmDeleteMovement(null)}>
+          <div className="est-modal" onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16, marginBottom: 8 }}>
+              Apagar movimentação?
+            </div>
+            <p style={{ fontSize: 13, color: TOKENS.inkLight, marginBottom: 20 }}>
+              {confirmDeleteMovement.transferId
+                ? "Essa movimentação faz parte de uma transferência — os dois lados (origem e destino) serão apagados e o estoque de ambas as filiais volta ao que era antes."
+                : "O estoque do produto será ajustado de volta, desfazendo o efeito dessa movimentação. Essa ação não pode ser desfeita."}
+            </p>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={() => setConfirmDeleteMovement(null)}>Cancelar</button>
+              <button className="est-btn" style={{ background: TOKENS.rust, color: "#fff" }} onClick={() => deleteMovement(confirmDeleteMovement)}>Apagar</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {importModal && (
@@ -1253,9 +1527,54 @@ function StockGauge({ quantity, minStock }) {
   );
 }
 
-function ProdutosTab({ products, search, setSearch, catFilter, setCatFilter, onNew, onEdit, onDelete }) {
+const PRODUTOS_COLUMNS = [
+  { key: "sku", label: "SKU", type: "text" },
+  { key: "name", label: "Produto", type: "text" },
+  { key: "category", label: "Setor", type: "text" },
+  { key: "unit", label: "Un.", type: "text" },
+  { key: "quantity", label: "Estoque", type: "number" },
+  { key: "minStock", label: "Mínimo", type: "number" },
+  { key: "unitPrice", label: "Preço", type: "number" },
+];
+
+function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setCatFilter, onNew, onEdit, onDelete }) {
+  const duplicateGroups = findDuplicateSkus(allProducts || products);
+  const [sort, setSort] = useState({ key: null, dir: "asc" });
+
+  function toggleSort(key) {
+    setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  }
+
+  const sortedProducts = useMemo(() => {
+    if (!sort.key) return products;
+    const col = PRODUTOS_COLUMNS.find((c) => c.key === sort.key);
+    const mult = sort.dir === "asc" ? 1 : -1;
+    return [...products].sort((a, b) => {
+      const va = a[sort.key];
+      const vb = b[sort.key];
+      if (col.type === "number") return ((Number(va) || 0) - (Number(vb) || 0)) * mult;
+      return String(va || "").localeCompare(String(vb || ""), "pt-BR") * mult;
+    });
+  }, [products, sort]);
+
   return (
     <div>
+      {duplicateGroups.length > 0 && (
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: `${TOKENS.rust}14`, border: `1px solid ${TOKENS.rust}44`, borderRadius: 8, padding: "10px 14px", marginBottom: 16 }}>
+          <AlertTriangle size={16} color={TOKENS.rustDark} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div style={{ fontSize: 12, color: TOKENS.rustDark }}>
+            <strong>{duplicateGroups.length} SKU{duplicateGroups.length > 1 ? "s" : ""} duplicado{duplicateGroups.length > 1 ? "s" : ""}</strong> — o mesmo código está em produtos diferentes, o que pode confundir transferências e importações. Renomeie o SKU de um deles:
+            <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+              {duplicateGroups.map((group) => (
+                <li key={normalizeSku(group[0].sku)}>
+                  <span className="est-mono">{group[0].sku}</span>: {group.map((p) => `${p.name} (${p.city})`).join(", ")}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <div style={{ position: "relative" }}>
@@ -1277,14 +1596,31 @@ function ProdutosTab({ products, search, setSearch, catFilter, setCatFilter, onN
         <table className="est-table">
           <thead>
             <tr>
-              <th>SKU</th><th>Produto</th><th>Setor</th><th>Un.</th><th>Estoque</th><th>Mínimo</th><th>Preço</th><th></th>
+              {PRODUTOS_COLUMNS.map((col) => {
+                const active = sort.key === col.key;
+                const Icon = active ? (sort.dir === "asc" ? ChevronUp : ChevronDown) : ChevronsUpDown;
+                return (
+                  <th
+                    key={col.key}
+                    onClick={() => toggleSort(col.key)}
+                    style={{ cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" }}
+                    title="Clique para ordenar"
+                  >
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                      {col.label}
+                      <Icon size={12} color={active ? TOKENS.ink : TOKENS.line} />
+                    </span>
+                  </th>
+                );
+              })}
+              <th></th>
             </tr>
           </thead>
           <tbody>
-            {products.length === 0 && (
+            {sortedProducts.length === 0 && (
               <tr><td colSpan={8} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>Nenhum produto encontrado.</td></tr>
             )}
-            {products.map((p) => {
+            {sortedProducts.map((p) => {
               const st = CAT_STYLE[p.category] || { color: TOKENS.ink, dark: TOKENS.ink };
               return (
                 <tr key={p.id}>
@@ -1313,7 +1649,7 @@ function ProdutosTab({ products, search, setSearch, catFilter, setCatFilter, onN
   );
 }
 
-function MovimentacoesTab({ products, movements, onEntrada, onSaida, onImportar }) {
+function MovimentacoesTab({ products, movements, onEntrada, onSaida, onImportar, onEditMovement, onDeleteMovement }) {
   const productMap = Object.fromEntries(products.map((p) => [p.id, p]));
   const sorted = [...movements].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 60);
   return (
@@ -1332,11 +1668,11 @@ function MovimentacoesTab({ products, movements, onEntrada, onSaida, onImportar 
       <div style={{ overflowX: "auto" }}>
         <table className="est-table">
           <thead>
-            <tr><th>Data</th><th>Tipo</th><th>Produto</th><th>Quantidade</th><th>Observação</th></tr>
+            <tr><th>Data</th><th>Tipo</th><th>Produto</th><th>Quantidade</th><th>Observação</th><th></th></tr>
           </thead>
           <tbody>
             {sorted.length === 0 && (
-              <tr><td colSpan={5} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>Nenhuma movimentação registrada nesta filial ainda.</td></tr>
+              <tr><td colSpan={6} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>Nenhuma movimentação registrada nesta filial ainda.</td></tr>
             )}
             {sorted.map((m) => {
               const p = productMap[m.productId];
@@ -1355,6 +1691,12 @@ function MovimentacoesTab({ products, movements, onEntrada, onSaida, onImportar 
                   <td>{p ? p.name : "Produto removido"}</td>
                   <td className="est-mono">{m.quantity} {p ? p.unit : ""}</td>
                   <td style={{ color: TOKENS.inkLight, fontSize: 12 }}>{m.note || "—"}</td>
+                  <td>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => onEditMovement(m)} style={{ background: "none", border: "none", cursor: "pointer", color: TOKENS.teal }}><Edit2 size={14} /></button>
+                      <button onClick={() => onDeleteMovement(m)} style={{ background: "none", border: "none", cursor: "pointer", color: TOKENS.rust }}><Trash2 size={14} /></button>
+                    </div>
+                  </td>
                 </tr>
               );
             })}
@@ -1444,15 +1786,46 @@ function RelatoriosTab({ products, movements, stats }) {
   );
 }
 
-function ProductModal({ product, defaultCity, onSave, onClose }) {
+function ProductModal({ product, defaultCity, allProducts, onSave, onClose }) {
+  const isEdit = !!product;
   const [form, setForm] = useState(product || {
     name: "", sku: "", category: CATEGORIES[0], quantity: 0, minStock: 5, unitPrice: 0, unit: "UN", city: defaultCity,
   });
-  const isEdit = !!product;
-  function update(field, value) { setForm((f) => ({ ...f, [field]: value })); }
+  const [skuError, setSkuError] = useState("");
+  // Guarda o último SKU sugerido automaticamente, pra saber se pode trocar a
+  // sugestão quando o setor muda (só troca se o usuário não tiver digitado
+  // um SKU próprio por cima).
+  const [lastSuggested, setLastSuggested] = useState(() =>
+    isEdit ? null : suggestSku(CATEGORIES[0], allProducts || [])
+  );
+
+  useEffect(() => {
+    if (isEdit) return;
+    if (!form.sku.trim() || form.sku === lastSuggested) {
+      const next = suggestSku(form.category, allProducts || []);
+      setLastSuggested(next);
+      setForm((f) => ({ ...f, sku: next }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.category]);
+
+  function update(field, value) {
+    setForm((f) => ({ ...f, [field]: value }));
+    if (field === "sku") setSkuError("");
+  }
+
   function submit(e) {
     e.preventDefault();
     if (!form.name.trim() || !form.sku.trim()) return;
+
+    const duplicate = (allProducts || []).find(
+      (p) => normalizeSku(p.sku) === normalizeSku(form.sku) && p.id !== form.id
+    );
+    if (duplicate) {
+      setSkuError(`Esse SKU já está em uso por "${duplicate.name}" (${duplicate.city}). Escolha outro.`);
+      return;
+    }
+
     onSave({ ...form, quantity: Number(form.quantity), minStock: Number(form.minStock), unitPrice: Number(form.unitPrice) });
   }
   return (
@@ -1472,6 +1845,7 @@ function ProductModal({ product, defaultCity, onSave, onClose }) {
           <div style={{ display: "flex", gap: 10 }}>
             <Field label="SKU" style={{ flex: 1 }}>
               <input className="est-input" style={{ width: "100%" }} value={form.sku} onChange={(e) => update("sku", e.target.value)} required />
+              {skuError && <div style={{ fontSize: 11, color: TOKENS.rustDark, marginTop: 4 }}>{skuError}</div>}
             </Field>
             <Field label="Setor" style={{ flex: 1 }}>
               <select className="est-input" style={{ width: "100%" }} value={form.category} onChange={(e) => update("category", e.target.value)}>
@@ -1556,6 +1930,86 @@ function MovementModal({ type, products, onSave, onClose }) {
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
           <button type="button" className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={onClose}>Cancelar</button>
           <button type="submit" className="est-btn" style={{ background: isIn ? TOKENS.teal : TOKENS.rust, color: "#fff" }}>Confirmar</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function MovementEditModal({ movement, linkedMovement, products, onSave, onDelete, onClose }) {
+  const isTransfer = !!linkedMovement;
+  const cityProducts = products.filter((p) => p.city === movement.city);
+  const [productId, setProductId] = useState(movement.productId);
+  const [type, setType] = useState(movement.type);
+  const [quantity, setQuantity] = useState(movement.quantity);
+  const [note, setNote] = useState(movement.note || "");
+  const isIn = type === "entrada";
+  const selected = cityProducts.find((p) => p.id === productId);
+
+  function submit(e) {
+    e.preventDefault();
+    if (!productId || Number(quantity) <= 0) return;
+    onSave({ productId, type, quantity: Number(quantity), note });
+  }
+
+  return (
+    <div className="est-modal-overlay" onClick={onClose}>
+      <form className="est-modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16 }}>
+            Editar movimentação
+          </div>
+          <button type="button" onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+        </div>
+
+        {isTransfer && (
+          <div style={{ fontSize: 12, color: TOKENS.inkLight, background: TOKENS.paperDark, borderRadius: 8, padding: "8px 10px", marginBottom: 12 }}>
+            Essa movimentação faz parte de uma transferência
+            {movement.type === "saida" ? ` (${movement.city} → ${linkedMovement.city})` : ` (${linkedMovement.city} → ${movement.city})`}.
+            Produto e tipo ficam fixos — só a quantidade muda, nos dois lados junto.
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <Field label="Produto">
+            <select
+              className="est-input"
+              style={{ width: "100%" }}
+              value={productId}
+              disabled={isTransfer}
+              onChange={(e) => setProductId(e.target.value)}
+            >
+              {cityProducts.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.sku})</option>)}
+            </select>
+          </Field>
+          <Field label="Tipo">
+            <select
+              className="est-input"
+              style={{ width: "100%" }}
+              value={type}
+              disabled={isTransfer}
+              onChange={(e) => setType(e.target.value)}
+            >
+              <option value="entrada">Entrada</option>
+              <option value="saida">Saída</option>
+            </select>
+          </Field>
+          <Field label={`Quantidade${selected ? ` (${selected.unit})` : ""}`}>
+            <input className="est-input" style={{ width: "100%" }} type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} required />
+          </Field>
+          <Field label="Observação">
+            <input className="est-input" style={{ width: "100%" }} value={note} onChange={(e) => setNote(e.target.value)} />
+          </Field>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "space-between", marginTop: 20 }}>
+          <button type="button" className="est-btn" style={{ background: `${TOKENS.rust}18`, color: TOKENS.rustDark }} onClick={onDelete}>
+            <Trash2 size={14} /> Apagar
+          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={onClose}>Cancelar</button>
+            <button type="submit" className="est-btn" style={{ background: isIn ? TOKENS.teal : TOKENS.rust, color: "#fff" }}>Salvar alterações</button>
+          </div>
         </div>
       </form>
     </div>
