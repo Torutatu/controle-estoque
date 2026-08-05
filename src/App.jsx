@@ -32,6 +32,9 @@ const CHANGELOG = [
   {
     date: "05/08/2026",
     added: [
+      "Valor da compra ao registrar uma entrada: informe o valor total da nota ou o preço por unidade — o outro é calculado sozinho. Opcionalmente atualiza o preço do produto no cadastro (vem marcado, desmarque em compras atípicas).",
+      "Coluna \"Valor\" na tabela e na impressão de Movimentações, com total no rodapé da folha.",
+      "Card \"Gasto em compras no mês\" no painel de Relatórios.",
       "Botão \"Imprimir\" nas abas Produtos e Movimentações — a folha impressa respeita exatamente o que estiver filtrado e ordenado na tela.",
       "Campo \"Data da compra\" ao registrar uma entrada (e ao editá-la), pra informar a data da nota quando o material entra no estoque em dia diferente do da compra.",
       "Coluna \"Data compra\" na tabela de Movimentações.",
@@ -234,6 +237,25 @@ function fmtBRL(v) {
 function fmtDate(iso) {
   return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
 }
+// Converte valor total do lote <-> preço por unidade base. O preço unitário
+// fica com 4 casas para não perder centavos em lotes grandes (ex: 3 UN por
+// R$ 10,00 dá 3,3333 por UN); o total sempre fecha em 2 casas, que é o que
+// está na nota. Devolve "" quando não dá pra calcular, pra deixar o campo
+// vazio em vez de mostrar "NaN".
+function deriveUnitCost(total, qty) {
+  const t = Number(total);
+  const q = Number(qty);
+  if (!t || !q || q <= 0 || !isFinite(t / q)) return "";
+  return String(Math.round((t / q) * 10000) / 10000);
+}
+
+function deriveTotalCost(unit, qty) {
+  const u = Number(unit);
+  const q = Number(qty);
+  if (!u || !q || q <= 0) return "";
+  return String(Math.round(u * q * 100) / 100);
+}
+
 // Data "YYYY-MM-DD" de hoje no fuso local — usada como limite máximo dos
 // campos <input type="date"> (não faz sentido comprar no futuro).
 function todayISODate() {
@@ -698,10 +720,23 @@ export default function ControleEstoque() {
     const product = products.find((p) => p.id === mv.productId);
     if (!product) return;
     const delta = mv.type === "entrada" ? mv.quantity : -mv.quantity;
+    // O preço do cadastro só é sobrescrito quando o usuário deixa marcado
+    // "atualizar preço" na entrada — compras atípicas não bagunçam o valor
+    // do estoque sem ele querer.
+    const newPrice = mv.updatePrice && mv.unitCost > 0 ? Math.round(mv.unitCost * 100) / 100 : null;
     const nextProducts = products.map((p) =>
-      p.id === mv.productId ? { ...p, quantity: Math.max(0, p.quantity + delta) } : p
+      p.id === mv.productId
+        ? {
+            ...p,
+            quantity: Math.max(0, p.quantity + delta),
+            ...(newPrice !== null ? { unitPrice: newPrice } : {}),
+          }
+        : p
     );
-    const newMv = { ...mv, id: uid(), city: product.city, date: new Date().toISOString(), createdBy: userName };
+    // updatePrice é só uma instrução do formulário, não faz parte do
+    // histórico — por isso não vai pro registro salvo.
+    const { updatePrice, ...mvData } = mv;
+    const newMv = { ...mvData, id: uid(), city: product.city, date: new Date().toISOString(), createdBy: userName };
     persist(nextProducts, [newMv, ...movements]);
     setMoveModal(null);
   }
@@ -819,10 +854,15 @@ export default function ControleEstoque() {
         const undo = original.type === "entrada" ? -original.quantity : original.quantity;
         return { ...p, quantity: Math.max(0, p.quantity + undo) };
       });
+      const newPrice = updates.updatePrice && updates.unitCost > 0 ? Math.round(updates.unitCost * 100) / 100 : null;
       nextProducts = nextProducts.map((p) => {
         if (p.id !== updates.productId) return p;
         const apply = updates.type === "entrada" ? newQty : -newQty;
-        return { ...p, quantity: Math.max(0, p.quantity + apply) };
+        return {
+          ...p,
+          quantity: Math.max(0, p.quantity + apply),
+          ...(newPrice !== null ? { unitPrice: newPrice } : {}),
+        };
       });
       const nextMovements = movements.map((m) =>
         m.id === original.id
@@ -835,11 +875,14 @@ export default function ControleEstoque() {
               editedBy: userName,
               editedAt: new Date().toISOString(),
               ...(updates.hasOwnProperty("source") ? { source: updates.source } : {}),
-              // Se virou saída, a data da compra deixa de fazer sentido e é
-              // limpa junto com a origem.
+              // Se virou saída, data da compra e valor deixam de fazer
+              // sentido e são limpos junto com a origem.
               ...(updates.hasOwnProperty("purchaseDate")
                 ? { purchaseDate: updates.purchaseDate }
                 : { purchaseDate: null }),
+              ...(updates.hasOwnProperty("totalCost")
+                ? { totalCost: updates.totalCost, unitCost: updates.unitCost }
+                : { totalCost: null, unitCost: null }),
             }
           : m
       );
@@ -1425,6 +1468,7 @@ function MovimentacoesPrintSheet({ target }) {
   const dateStr = new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
   const entradas = rows.filter((m) => m.type === "entrada").reduce((s, m) => s + (Number(m.quantity) || 0), 0);
   const saidas = rows.filter((m) => m.type === "saida").reduce((s, m) => s + (Number(m.quantity) || 0), 0);
+  const totalGasto = rows.reduce((s, m) => s + (Number(m.totalCost) || 0), 0);
 
   return (
     <PrintShell
@@ -1440,6 +1484,7 @@ function MovimentacoesPrintSheet({ target }) {
             <th>SKU</th>
             <th>Produto</th>
             <th style={{ textAlign: "right" }}>Qtd.</th>
+            <th style={{ textAlign: "right" }}>Valor</th>
             <th>Observação</th>
             <th>Por</th>
           </tr>
@@ -1462,6 +1507,7 @@ function MovimentacoesPrintSheet({ target }) {
                   ? `${m.packageQty} ${m.packageUnit} (${m.quantity} ${m.productUnit})`
                   : `${m.quantity} ${m.productUnit}`}
               </td>
+              <td style={{ textAlign: "right" }}>{m.totalCost > 0 ? fmtBRL(m.totalCost) : "—"}</td>
               <td>{m.note || "—"}</td>
               <td>{m.createdBy || "—"}</td>
             </tr>
@@ -1472,6 +1518,11 @@ function MovimentacoesPrintSheet({ target }) {
       <div style={{ fontSize: 12, textAlign: "right", color: "#333", marginTop: 6 }}>
         {rows.length} movimentaç{rows.length === 1 ? "ão" : "ões"} · entradas: {entradas} · saídas: {saidas}
       </div>
+      {totalGasto > 0 && (
+        <div style={{ fontSize: 12, textAlign: "right", color: "#333", marginTop: 2, fontWeight: 700 }}>
+          Total com valor informado: {fmtBRL(totalGasto)}
+        </div>
+      )}
     </PrintShell>
   );
 }
@@ -2551,11 +2602,11 @@ function MovimentacoesTab({ products, movements, city, onEntrada, onSaida, onImp
       <div style={{ overflowX: "auto" }}>
         <table className="est-table">
           <thead>
-            <tr><th>Data</th><th>Data compra</th><th>Tipo</th><th>Produto</th><th>Quantidade</th><th>Observação</th><th>Por</th><th></th></tr>
+            <tr><th>Data</th><th>Data compra</th><th>Tipo</th><th>Produto</th><th>Quantidade</th><th>Valor</th><th>Observação</th><th>Por</th><th></th></tr>
           </thead>
           <tbody>
             {sorted.length === 0 && (
-              <tr><td colSpan={8} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>
+              <tr><td colSpan={9} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>
                 {movements.length === 0
                   ? "Nenhuma movimentação registrada nesta filial ainda."
                   : "Nenhuma movimentação encontrada com esses filtros."}
@@ -2594,6 +2645,20 @@ function MovimentacoesTab({ products, movements, city, onEntrada, onSaida, onImp
                       <>{m.quantity} {p ? p.unit : ""}</>
                     )}
                   </td>
+                  <td className="est-mono">
+                    {m.totalCost > 0 ? (
+                      <>
+                        {fmtBRL(m.totalCost)}
+                        {m.unitCost > 0 && (
+                          <div style={{ fontSize: 10, color: TOKENS.inkLight }}>
+                            {fmtBRL(m.unitCost)}/{p ? p.unit : "un"}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <span style={{ color: TOKENS.inkLight }}>—</span>
+                    )}
+                  </td>
                   <td style={{ color: TOKENS.inkLight, fontSize: 12 }}>{m.note || "—"}</td>
                   <td style={{ color: TOKENS.inkLight, fontSize: 12 }}>
                     {m.createdBy || "—"}
@@ -2626,6 +2691,11 @@ function RelatoriosTab({ products, movements, stats }) {
   });
   const entradasMes = monthMoves.filter((m) => m.type === "entrada").reduce((s, m) => s + m.quantity, 0);
   const saidasMes = monthMoves.filter((m) => m.type === "saida").reduce((s, m) => s + m.quantity, 0);
+  // Só soma entradas que têm valor informado — diferente das quantidades,
+  // aqui a unidade é R$ pra todo mundo, então o total faz sentido.
+  const entradasComValor = monthMoves.filter((m) => m.type === "entrada" && Number(m.totalCost) > 0);
+  const gastoMes = entradasComValor.reduce((s, m) => s + Number(m.totalCost), 0);
+  const entradasSemValor = monthMoves.filter((m) => m.type === "entrada").length - entradasComValor.length;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -2633,6 +2703,19 @@ function RelatoriosTab({ products, movements, stats }) {
         <MetricCard label="Entradas no mês" value={entradasMes} icon={ArrowUpCircle} accent={TOKENS.teal} />
         <MetricCard label="Saídas no mês" value={saidasMes} icon={ArrowDownCircle} accent={TOKENS.rust} />
         <MetricCard label="Itens zerados" value={zerados.length} icon={AlertTriangle} accent={TOKENS.rust} />
+        <MetricCard
+          label="Gasto em compras no mês"
+          value={fmtBRL(gastoMes)}
+          icon={ShoppingCart}
+          accent={TOKENS.purple}
+          sub={
+            entradasSemValor > 0
+              ? `${entradasSemValor} entrada${entradasSemValor > 1 ? "s" : ""} sem valor informado`
+              : entradasComValor.length > 0
+              ? `${entradasComValor.length} entrada${entradasComValor.length > 1 ? "s" : ""} com valor`
+              : "nenhuma entrada com valor"
+          }
+        />
       </div>
 
       <div className="est-card" style={{ padding: 16 }}>
@@ -2856,6 +2939,12 @@ function MovementModal({ type, products, onSave, onClose }) {
   const [source, setSource] = useState("");
   const [purchaseDate, setPurchaseDate] = useState("");
   const [note, setNote] = useState("");
+  const [totalCost, setTotalCost] = useState("");
+  const [unitCost, setUnitCost] = useState("");
+  // Guarda qual dos dois campos de valor o usuário digitou por último. Quando
+  // a quantidade muda, o outro campo é recalculado a partir desse.
+  const costDriver = useRef(null);
+  const [updatePrice, setUpdatePrice] = useState(true);
   const isIn = type === "entrada";
   const selected = products.find((p) => p.id === productId);
 
@@ -2872,10 +2961,36 @@ function MovementModal({ type, products, onSave, onClose }) {
     ? Math.round(((Number(quantity) || 0) * (Number(factor) || 0)) * 100) / 100
     : Number(quantity) || 0;
 
+  // Mantém total e unitário coerentes quando a quantidade muda depois de o
+  // valor já ter sido digitado.
+  useEffect(() => {
+    if (!isIn || !costDriver.current) return;
+    if (costDriver.current === "total") {
+      setUnitCost(deriveUnitCost(totalCost, totalQty));
+    } else {
+      setTotalCost(deriveTotalCost(unitCost, totalQty));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalQty]);
+
+  function handleTotalCostChange(v) {
+    costDriver.current = "total";
+    setTotalCost(v);
+    setUnitCost(deriveUnitCost(v, totalQty));
+  }
+
+  function handleUnitCostChange(v) {
+    costDriver.current = "unit";
+    setUnitCost(v);
+    setTotalCost(deriveTotalCost(v, totalQty));
+  }
+
   function submit(e) {
     e.preventDefault();
     if (!productId || totalQty <= 0) return;
     if (isIn && !source) return;
+    const total = Number(totalCost) || 0;
+    const unit = Number(unitCost) || 0;
     onSave({
       productId,
       type,
@@ -2884,7 +2999,15 @@ function MovementModal({ type, products, onSave, onClose }) {
       ...(needsFactor
         ? { packageUnit: unitType, packageQty: Number(quantity), unitsPerPackage: Number(factor) }
         : {}),
-      ...(isIn ? { source, purchaseDate: purchaseDate || null } : {}),
+      ...(isIn
+        ? {
+            source,
+            purchaseDate: purchaseDate || null,
+            totalCost: total > 0 ? total : null,
+            unitCost: unit > 0 ? unit : null,
+            updatePrice: total > 0 && updatePrice,
+          }
+        : {}),
     });
   }
 
@@ -2937,6 +3060,56 @@ function MovementModal({ type, products, onSave, onClose }) {
               </div>
             </Field>
           )}
+          {isIn && (
+            <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 12, marginBottom: 10, color: TOKENS.inkLight, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                Valor da compra (opcional)
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="Valor total (R$)">
+                  <input
+                    className="est-input"
+                    style={{ width: "100%" }}
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={totalCost}
+                    onChange={(e) => handleTotalCostChange(e.target.value)}
+                    placeholder="0,00"
+                  />
+                </Field>
+                <Field label={`Preço por ${baseUnit} (R$)`}>
+                  <input
+                    className="est-input"
+                    style={{ width: "100%" }}
+                    type="number"
+                    min="0"
+                    step="0.0001"
+                    value={unitCost}
+                    onChange={(e) => handleUnitCostChange(e.target.value)}
+                    placeholder="0,00"
+                  />
+                </Field>
+              </div>
+              <div style={{ fontSize: 11, color: TOKENS.inkLight, marginTop: 6 }}>
+                Preencha um dos dois — o outro é calculado sobre {totalQty || 0} {baseUnit}.
+              </div>
+              {Number(totalCost) > 0 && (
+                <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 10, cursor: "pointer" }}>
+                  <input type="checkbox" checked={updatePrice} onChange={(e) => setUpdatePrice(e.target.checked)} style={{ marginTop: 2 }} />
+                  <span style={{ fontSize: 12, color: TOKENS.charcoal }}>
+                    Atualizar o preço do produto no cadastro
+                    {selected && selected.unitPrice > 0 && (
+                      <span style={{ color: TOKENS.inkLight }}>
+                        {" "}(hoje {fmtBRL(selected.unitPrice)} por {baseUnit}
+                        {Number(unitCost) > 0 ? ` → ${fmtBRL(Number(unitCost))}` : ""})
+                      </span>
+                    )}
+                  </span>
+                </label>
+              )}
+            </div>
+          )}
           {selected && !isIn && totalQty > selected.quantity && (
             <div style={{ fontSize: 12, color: TOKENS.rustDark, background: `${TOKENS.rust}12`, padding: "6px 10px", borderRadius: 6 }}>
               Estoque atual: {selected.quantity} {selected.unit}. A saída deixará o saldo ajustado para zero.
@@ -2965,19 +3138,54 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
   const [source, setSource] = useState(movement.source || "");
   const [purchaseDate, setPurchaseDate] = useState(movement.purchaseDate || "");
   const [note, setNote] = useState(movement.note || "");
+  const [totalCost, setTotalCost] = useState(movement.totalCost != null ? String(movement.totalCost) : "");
+  const [unitCost, setUnitCost] = useState(movement.unitCost != null ? String(movement.unitCost) : "");
+  const costDriver = useRef(null);
+  const [updatePrice, setUpdatePrice] = useState(false);
   const isIn = type === "entrada";
   const selected = cityProducts.find((p) => p.id === productId);
+  const baseUnit = selected ? selected.unit : "UN";
+  const qtyNum = Number(quantity) || 0;
+
+  useEffect(() => {
+    if (!costDriver.current) return;
+    if (costDriver.current === "total") setUnitCost(deriveUnitCost(totalCost, qtyNum));
+    else setTotalCost(deriveTotalCost(unitCost, qtyNum));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qtyNum]);
+
+  function handleTotalCostChange(v) {
+    costDriver.current = "total";
+    setTotalCost(v);
+    setUnitCost(deriveUnitCost(v, qtyNum));
+  }
+
+  function handleUnitCostChange(v) {
+    costDriver.current = "unit";
+    setUnitCost(v);
+    setTotalCost(deriveTotalCost(v, qtyNum));
+  }
 
   function submit(e) {
     e.preventDefault();
     if (!productId || Number(quantity) <= 0) return;
     if (isIn && !isTransfer && !source) return;
+    const total = Number(totalCost) || 0;
+    const unit = Number(unitCost) || 0;
     onSave({
       productId,
       type,
       quantity: Number(quantity),
       note,
-      ...(isIn && !isTransfer ? { source, purchaseDate: purchaseDate || null } : {}),
+      ...(isIn && !isTransfer
+        ? {
+            source,
+            purchaseDate: purchaseDate || null,
+            totalCost: total > 0 ? total : null,
+            unitCost: unit > 0 ? unit : null,
+            updatePrice: total > 0 && updatePrice,
+          }
+        : {}),
     });
   }
 
@@ -3046,6 +3254,32 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
                 onChange={(e) => setPurchaseDate(e.target.value)}
               />
             </Field>
+          )}
+          {isIn && !isTransfer && (
+            <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 12, marginBottom: 10, color: TOKENS.inkLight, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                Valor da compra (opcional)
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="Valor total (R$)">
+                  <input className="est-input" style={{ width: "100%" }} type="number" min="0" step="0.01" value={totalCost} onChange={(e) => handleTotalCostChange(e.target.value)} placeholder="0,00" />
+                </Field>
+                <Field label={`Preço por ${baseUnit} (R$)`}>
+                  <input className="est-input" style={{ width: "100%" }} type="number" min="0" step="0.0001" value={unitCost} onChange={(e) => handleUnitCostChange(e.target.value)} placeholder="0,00" />
+                </Field>
+              </div>
+              {Number(totalCost) > 0 && (
+                <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 10, cursor: "pointer" }}>
+                  <input type="checkbox" checked={updatePrice} onChange={(e) => setUpdatePrice(e.target.checked)} style={{ marginTop: 2 }} />
+                  <span style={{ fontSize: 12, color: TOKENS.charcoal }}>
+                    Atualizar o preço do produto no cadastro
+                    {selected && selected.unitPrice > 0 && (
+                      <span style={{ color: TOKENS.inkLight }}> (hoje {fmtBRL(selected.unitPrice)} por {baseUnit})</span>
+                    )}
+                  </span>
+                </label>
+              )}
+            </div>
           )}
           <Field label="Observação">
             <input className="est-input" style={{ width: "100%" }} value={note} onChange={(e) => setNote(e.target.value)} />
