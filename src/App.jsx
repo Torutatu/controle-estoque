@@ -9,6 +9,7 @@ import {
   ArrowUpCircle, ArrowDownCircle, Boxes, MapPin, ShoppingCart, Wand2,
   Copy, Download, Check, FileText, Upload, FileSpreadsheet, AlertCircle,
   ArrowLeftRight, ChevronUp, ChevronDown, ChevronsUpDown, Divide, Sparkles, RotateCcw, Archive,
+  Printer,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { storage, readLegacyLocalStorage } from "./storage";
@@ -28,6 +29,16 @@ const UNITS = ["UN", "CX", "PCT", "FARDO"];
 // com o CHANGELOG.md sempre que uma nova versão for publicada — entrada mais
 // recente primeiro.
 const CHANGELOG = [
+  {
+    date: "05/08/2026",
+    added: [
+      "Botão \"Imprimir\" nas abas Produtos e Movimentações — a folha impressa respeita exatamente o que estiver filtrado e ordenado na tela.",
+      "Campo \"Data da compra\" ao registrar uma entrada (e ao editá-la), pra informar a data da nota quando o material entra no estoque em dia diferente do da compra.",
+      "Coluna \"Data compra\" na tabela de Movimentações.",
+      "Filtro por tipo (Todos / Entradas / Saídas) e campo de busca por produto ou SKU na aba Movimentações.",
+    ],
+    fixed: [],
+  },
   {
     date: "11/07/2026",
     added: [
@@ -223,6 +234,24 @@ function fmtBRL(v) {
 function fmtDate(iso) {
   return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
 }
+// Data "YYYY-MM-DD" de hoje no fuso local — usada como limite máximo dos
+// campos <input type="date"> (não faz sentido comprar no futuro).
+function todayISODate() {
+  const d = new Date();
+  const off = d.getTimezoneOffset();
+  return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+}
+
+// Formata a data da compra, que vem como "YYYY-MM-DD" puro (sem fuso) do
+// <input type="date">. Fazer new Date("2026-08-05") interpretaria como UTC e
+// poderia voltar um dia no Brasil, então a conversão é feita na mão.
+function fmtPurchaseDate(value) {
+  if (!value) return "—";
+  const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return "—";
+  return `${m[3]}/${m[2]}/${m[1]}`;
+}
+
 function fmtDateTime(iso) {
   if (!iso) return "";
   return new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -806,6 +835,11 @@ export default function ControleEstoque() {
               editedBy: userName,
               editedAt: new Date().toISOString(),
               ...(updates.hasOwnProperty("source") ? { source: updates.source } : {}),
+              // Se virou saída, a data da compra deixa de fazer sentido e é
+              // limpa junto com a origem.
+              ...(updates.hasOwnProperty("purchaseDate")
+                ? { purchaseDate: updates.purchaseDate }
+                : { purchaseDate: null }),
             }
           : m
       );
@@ -992,6 +1026,8 @@ export default function ControleEstoque() {
         .est-card { background: #fff; border: 1px solid ${TOKENS.line}; border-radius: 10px; }
         .est-btn { font-family: 'Inter', sans-serif; font-weight: 600; cursor: pointer; border: none; border-radius: 8px; padding: 9px 16px; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; transition: opacity 0.15s ease; }
         .est-btn:hover { opacity: 0.88; }
+        .est-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+        .est-btn:disabled:hover { opacity: 0.45; }
         .est-input { font-family: 'Inter', sans-serif; border: 1px solid ${TOKENS.line}; border-radius: 8px; padding: 8px 10px; font-size: 13px; background: #fff; color: ${TOKENS.charcoal}; }
         .est-input:focus { outline: 2px solid ${TOKENS.teal}44; }
         table.est-table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -1122,7 +1158,7 @@ export default function ControleEstoque() {
             products={activeProducts}
             city={city}
             onSave={updateOrderQuantities}
-            onRequestPrint={setPrintTarget}
+            onRequestPrint={(t) => setPrintTarget({ kind: "pedido", ...t })}
             onChangeSource={updateProductOrderSource}
             onResetSource={resetOrderSourceToMatriz}
           />
@@ -1140,6 +1176,8 @@ export default function ControleEstoque() {
               <ProdutosTab
                 products={filteredProducts}
                 allProducts={activeProducts}
+                city={city}
+                onRequestPrint={setPrintTarget}
                 search={search}
                 setSearch={setSearch}
                 catFilter={catFilter}
@@ -1157,6 +1195,8 @@ export default function ControleEstoque() {
               <MovimentacoesTab
                 products={cityProductsForHistory}
                 movements={cityMovements}
+                city={city}
+                onRequestPrint={setPrintTarget}
                 onEntrada={() => setMoveModal({ type: "entrada" })}
                 onSaida={() => setMoveModal({ type: "saida" })}
                 onImportar={() => setImportModal(true)}
@@ -1276,41 +1316,176 @@ export default function ControleEstoque() {
   );
 }
 
+// CSS e cabeçalho compartilhados por todas as folhas de impressão.
+const PRINT_SHEET_CSS = `
+  @media print {
+    @page { margin: 16mm; }
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+  .ps-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 8px; }
+  .ps-table th { text-align: left; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: #555; padding: 6px 8px; border-bottom: 1.5px solid #1a1a1a; }
+  .ps-table td { padding: 6px 8px; border-bottom: 0.5px solid #ccc; }
+  .ps-table thead { display: table-header-group; }
+  .ps-table tr { break-inside: avoid; }
+  .ps-city-heading { break-after: avoid; break-inside: avoid; }
+  .ps-category-heading { break-after: avoid; break-inside: avoid; }
+`;
+
+function PrintShell({ title, subtitle, children }) {
+  return (
+    <div className="print-sheet" style={{ fontFamily: "'Inter', sans-serif", color: "#1a1a1a", padding: "24px" }}>
+      <style>{PRINT_SHEET_CSS}</style>
+      <div style={{ display: "flex", alignItems: "center", gap: 16, borderBottom: "2px solid #1a1a1a", paddingBottom: 16, marginBottom: 20 }}>
+        <img src={LOGO_PRINT} alt="Logo" style={{ height: 56, objectFit: "contain" }} />
+        <div>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 18 }}>{title}</div>
+          <div style={{ fontSize: 12, color: "#555" }}>{subtitle}</div>
+        </div>
+      </div>
+      {children}
+      <div style={{ fontSize: 10, color: "#999", borderTop: "0.5px solid #ccc", paddingTop: 10, marginTop: 12 }}>
+        Documento gerado automaticamente pelo sistema de controle de estoque.
+      </div>
+    </div>
+  );
+}
+
 function PrintSheet({ products, target }) {
   if (!target) return null;
+  if (target.kind === "produtos") return <ProdutosPrintSheet target={target} />;
+  if (target.kind === "movimentacoes") return <MovimentacoesPrintSheet target={target} />;
+  return <PedidoPrintSheet products={products} target={target} />;
+}
+
+// Lista de produtos da filial, exatamente na ordem/filtro que estava na tela.
+function ProdutosPrintSheet({ target }) {
+  const rows = target.rows || [];
+  const dateStr = new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
+  const totalUnidades = rows.reduce((s, p) => s + (Number(p.quantity) || 0), 0);
+  const totalValor = rows.reduce((s, p) => s + (Number(p.quantity) || 0) * (Number(p.unitPrice) || 0), 0);
+  const abaixoMinimo = rows.filter((p) => (Number(p.quantity) || 0) <= (Number(p.minStock) || 0)).length;
+
+  return (
+    <PrintShell
+      title="Lista de produtos"
+      subtitle={`${target.city} · gerado em ${dateStr}${target.filterLabel ? ` · ${target.filterLabel}` : ""}`}
+    >
+      <table className="ps-table">
+        <thead>
+          <tr>
+            <th>SKU</th>
+            <th>Produto</th>
+            <th>Setor</th>
+            <th>Un.</th>
+            <th style={{ textAlign: "right" }}>Estoque</th>
+            <th style={{ textAlign: "right" }}>Mínimo</th>
+            <th style={{ textAlign: "right" }}>Preço</th>
+            <th style={{ textAlign: "right" }}>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((p) => {
+            const baixo = (Number(p.quantity) || 0) <= (Number(p.minStock) || 0);
+            return (
+              <tr key={p.id}>
+                <td>{p.sku}</td>
+                <td style={{ fontWeight: baixo ? 700 : 400 }}>
+                  {p.name}
+                  {baixo ? " *" : ""}
+                </td>
+                <td>{p.category}</td>
+                <td>{p.unit}</td>
+                <td style={{ textAlign: "right" }}>{p.quantity}</td>
+                <td style={{ textAlign: "right" }}>{p.minStock}</td>
+                <td style={{ textAlign: "right" }}>{p.unitPrice > 0 ? fmtBRL(p.unitPrice) : "—"}</td>
+                <td style={{ textAlign: "right" }}>
+                  {p.unitPrice > 0 ? fmtBRL((Number(p.quantity) || 0) * Number(p.unitPrice)) : "—"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      <div style={{ fontSize: 12, textAlign: "right", color: "#333", marginTop: 6 }}>
+        {rows.length} produto{rows.length === 1 ? "" : "s"} · {totalUnidades} unidades · valor em estoque {fmtBRL(totalValor)}
+      </div>
+      {abaixoMinimo > 0 && (
+        <div style={{ fontSize: 11, color: "#555", textAlign: "right", marginTop: 4 }}>
+          * {abaixoMinimo} {abaixoMinimo === 1 ? "item está" : "itens estão"} no mínimo ou abaixo dele.
+        </div>
+      )}
+    </PrintShell>
+  );
+}
+
+// Histórico de movimentações já filtrado na tela (sem o corte de 60 linhas).
+function MovimentacoesPrintSheet({ target }) {
+  const rows = target.rows || [];
+  const dateStr = new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
+  const entradas = rows.filter((m) => m.type === "entrada").reduce((s, m) => s + (Number(m.quantity) || 0), 0);
+  const saidas = rows.filter((m) => m.type === "saida").reduce((s, m) => s + (Number(m.quantity) || 0), 0);
+
+  return (
+    <PrintShell
+      title="Movimentações"
+      subtitle={`${target.city} · gerado em ${dateStr}${target.filterLabel ? ` · ${target.filterLabel}` : ""}`}
+    >
+      <table className="ps-table">
+        <thead>
+          <tr>
+            <th>Data</th>
+            <th>Data compra</th>
+            <th>Tipo</th>
+            <th>SKU</th>
+            <th>Produto</th>
+            <th style={{ textAlign: "right" }}>Qtd.</th>
+            <th>Observação</th>
+            <th>Por</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((m) => (
+            <tr key={m.id}>
+              <td>{fmtDate(m.date)}</td>
+              <td>{fmtPurchaseDate(m.purchaseDate)}</td>
+              <td>
+                {m.type === "entrada" ? "Entrada" : "Saída"}
+                {m.type === "entrada" && m.source
+                  ? m.source === "matriz" ? " (matriz)" : " (local)"
+                  : ""}
+              </td>
+              <td>{m.productSku}</td>
+              <td>{m.productName}</td>
+              <td style={{ textAlign: "right" }}>
+                {m.packageUnit
+                  ? `${m.packageQty} ${m.packageUnit} (${m.quantity} ${m.productUnit})`
+                  : `${m.quantity} ${m.productUnit}`}
+              </td>
+              <td>{m.note || "—"}</td>
+              <td>{m.createdBy || "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <div style={{ fontSize: 12, textAlign: "right", color: "#333", marginTop: 6 }}>
+        {rows.length} movimentaç{rows.length === 1 ? "ão" : "ões"} · entradas: {entradas} · saídas: {saidas}
+      </div>
+    </PrintShell>
+  );
+}
+
+function PedidoPrintSheet({ products, target }) {
   const targetCity = target.city;
   const source = target.source || "matriz";
   const cities = targetCity === "all" ? CITIES : [targetCity];
   const dateStr = new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
   return (
-    <div className="print-sheet" style={{ fontFamily: "'Inter', sans-serif", color: "#1a1a1a", padding: "24px" }}>
-      <style>{`
-        @media print {
-          @page { margin: 16mm; }
-          body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-        }
-        .ps-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 8px; }
-        .ps-table th { text-align: left; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: #555; padding: 6px 8px; border-bottom: 1.5px solid #1a1a1a; }
-        .ps-table td { padding: 6px 8px; border-bottom: 0.5px solid #ccc; }
-        .ps-table thead { display: table-header-group; }
-        .ps-table tr { break-inside: avoid; }
-        .ps-city-heading { break-after: avoid; break-inside: avoid; }
-        .ps-category-heading { break-after: avoid; break-inside: avoid; }
-      `}</style>
-
-      <div style={{ display: "flex", alignItems: "center", gap: 16, borderBottom: "2px solid #1a1a1a", paddingBottom: 16, marginBottom: 20 }}>
-        <img src={LOGO_PRINT} alt="Logo" style={{ height: 56, objectFit: "contain" }} />
-        <div>
-          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 18 }}>
-            {source === "local" ? "Compra local" : "Pedido de compra"}
-          </div>
-          <div style={{ fontSize: 12, color: "#555" }}>
-            {targetCity === "all" ? "Todas as filiais" : targetCity} · gerado em {dateStr}
-            {source === "local" ? " · itens de compra local (não enviar à matriz)" : ""}
-          </div>
-        </div>
-      </div>
-
+    <PrintShell
+      title={source === "local" ? "Compra local" : "Pedido de compra"}
+      subtitle={`${targetCity === "all" ? "Todas as filiais" : targetCity} · gerado em ${dateStr}${source === "local" ? " · itens de compra local (não enviar à matriz)" : ""}`}
+    >
       {cities.map((c) => {
         const items = products.filter((p) => p.city === c && (Number(p.orderQty) || 0) > 0 && (p.orderSource || "matriz") === source);
         const total = items.reduce((s, p) => s + (Number(p.orderQty) || 0), 0);
@@ -1363,11 +1538,7 @@ function PrintSheet({ products, target }) {
           </div>
         );
       })}
-
-      <div style={{ fontSize: 10, color: "#999", borderTop: "0.5px solid #ccc", paddingTop: 10, marginTop: 12 }}>
-        Documento gerado automaticamente pelo sistema de controle de estoque.
-      </div>
-    </div>
+    </PrintShell>
   );
 }
 
@@ -2116,7 +2287,7 @@ const PEDIDOS_COLUMNS = [
   { key: "minStock", label: "Mínimo", type: "number" },
 ];
 
-function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setCatFilter, onNew, onEdit, onDelete, onConvert, trashCount, onOpenTrash }) {
+function ProdutosTab({ products, allProducts, city, search, setSearch, catFilter, setCatFilter, onNew, onEdit, onDelete, onConvert, trashCount, onOpenTrash, onRequestPrint }) {
   const duplicateGroups = findDuplicateSkus(allProducts || products);
   const [sort, setSort] = useState({ key: null, dir: "asc" });
 
@@ -2135,6 +2306,15 @@ function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setC
       return String(va || "").localeCompare(String(vb || ""), "pt-BR") * mult;
     });
   }, [products, sort]);
+
+  // Imprime exatamente o que está na tela: mesma busca, mesmo filtro de setor
+  // e mesma ordenação de coluna.
+  function handlePrint() {
+    const parts = [];
+    if (catFilter !== "Todos") parts.push(`setor: ${catFilter}`);
+    if (search.trim()) parts.push(`busca: "${search.trim()}"`);
+    onRequestPrint({ kind: "produtos", city, rows: sortedProducts, filterLabel: parts.join(" · ") });
+  }
 
   return (
     <div>
@@ -2167,6 +2347,15 @@ function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setC
           </select>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
+          <button
+            className="est-btn"
+            style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }}
+            onClick={handlePrint}
+            disabled={sortedProducts.length === 0}
+            title="Imprimir a lista como está filtrada na tela"
+          >
+            <Printer size={14} /> Imprimir
+          </button>
           {trashCount > 0 && (
             <button className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={onOpenTrash}>
               <Archive size={14} /> Lixeira ({trashCount})
@@ -2238,9 +2427,48 @@ function ProdutosTab({ products, allProducts, search, setSearch, catFilter, setC
   );
 }
 
-function MovimentacoesTab({ products, movements, onEntrada, onSaida, onImportar, onEditMovement, onDeleteMovement }) {
+const MOVIMENTACOES_LIMIT = 60;
+
+function MovimentacoesTab({ products, movements, city, onEntrada, onSaida, onImportar, onEditMovement, onDeleteMovement, onRequestPrint }) {
   const productMap = Object.fromEntries(products.map((p) => [p.id, p]));
-  const sorted = [...movements].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 60);
+  const [typeFilter, setTypeFilter] = useState("todos");
+  const [moveSearch, setMoveSearch] = useState("");
+
+  // Filtra por tipo e por texto (nome ou SKU do produto) e ordena da mais
+  // recente pra mais antiga. A tela mostra só as primeiras
+  // MOVIMENTACOES_LIMIT, mas a impressão leva a lista filtrada inteira.
+  const filtered = useMemo(() => {
+    const q = moveSearch.trim().toLowerCase();
+    return [...movements]
+      .filter((m) => (typeFilter === "todos" ? true : m.type === typeFilter))
+      .filter((m) => {
+        if (!q) return true;
+        const p = productMap[m.productId];
+        if (!p) return false;
+        return p.name.toLowerCase().includes(q) || String(p.sku || "").toLowerCase().includes(q);
+      })
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+  }, [movements, typeFilter, moveSearch, products]);
+
+  const sorted = filtered.slice(0, MOVIMENTACOES_LIMIT);
+  const hasFilter = typeFilter !== "todos" || moveSearch.trim() !== "";
+
+  function handlePrint() {
+    const rows = filtered.map((m) => {
+      const p = productMap[m.productId];
+      return {
+        ...m,
+        productName: p ? p.name : "Produto removido",
+        productSku: p ? p.sku : "—",
+        productUnit: p ? p.unit : "",
+      };
+    });
+    const parts = [];
+    if (typeFilter !== "todos") parts.push(typeFilter === "entrada" ? "somente entradas" : "somente saídas");
+    if (moveSearch.trim()) parts.push(`busca: "${moveSearch.trim()}"`);
+    onRequestPrint({ kind: "movimentacoes", city, rows, filterLabel: parts.join(" · ") });
+  }
+
   return (
     <div>
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
@@ -2253,15 +2481,85 @@ function MovimentacoesTab({ products, movements, onEntrada, onSaida, onImportar,
         <button className="est-btn" style={{ background: TOKENS.purple, color: "#fff" }} onClick={onImportar}>
           <Upload size={14} /> Importar planilha
         </button>
+        <button
+          className="est-btn"
+          style={{ background: TOKENS.paperDark, color: TOKENS.charcoal, marginLeft: "auto" }}
+          onClick={handlePrint}
+          disabled={filtered.length === 0}
+          title="Imprimir a lista como está filtrada na tela"
+        >
+          <Printer size={14} /> Imprimir
+        </button>
       </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ position: "relative" }}>
+          <Search size={14} style={{ position: "absolute", left: 10, top: 10, color: TOKENS.inkLight }} />
+          <input
+            className="est-input"
+            style={{ paddingLeft: 30, width: 220 }}
+            placeholder="Buscar produto por nome ou SKU"
+            value={moveSearch}
+            onChange={(e) => setMoveSearch(e.target.value)}
+          />
+        </div>
+        <div style={{ display: "flex", gap: 4, background: TOKENS.paperDark, borderRadius: 8, padding: 3 }}>
+          {[
+            { key: "todos", label: "Todos" },
+            { key: "entrada", label: "Entradas" },
+            { key: "saida", label: "Saídas" },
+          ].map((opt) => {
+            const active = typeFilter === opt.key;
+            return (
+              <button
+                key={opt.key}
+                type="button"
+                onClick={() => setTypeFilter(opt.key)}
+                style={{
+                  fontFamily: "'Inter', sans-serif",
+                  fontWeight: 600,
+                  fontSize: 12,
+                  border: "none",
+                  cursor: "pointer",
+                  borderRadius: 6,
+                  padding: "6px 14px",
+                  background: active ? (opt.key === "entrada" ? TOKENS.teal : opt.key === "saida" ? TOKENS.rust : TOKENS.ink) : "transparent",
+                  color: active ? "#fff" : TOKENS.inkLight,
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+        {hasFilter && (
+          <button
+            type="button"
+            onClick={() => { setTypeFilter("todos"); setMoveSearch(""); }}
+            className="est-mono"
+            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: TOKENS.inkLight, textDecoration: "underline" }}
+          >
+            limpar filtros
+          </button>
+        )}
+        <div className="est-mono" style={{ fontSize: 11, color: TOKENS.inkLight, marginLeft: "auto" }}>
+          {filtered.length} movimentaç{filtered.length === 1 ? "ão" : "ões"}
+          {filtered.length > MOVIMENTACOES_LIMIT ? ` · exibindo as ${MOVIMENTACOES_LIMIT} mais recentes` : ""}
+        </div>
+      </div>
+
       <div style={{ overflowX: "auto" }}>
         <table className="est-table">
           <thead>
-            <tr><th>Data</th><th>Tipo</th><th>Produto</th><th>Quantidade</th><th>Observação</th><th>Por</th><th></th></tr>
+            <tr><th>Data</th><th>Data compra</th><th>Tipo</th><th>Produto</th><th>Quantidade</th><th>Observação</th><th>Por</th><th></th></tr>
           </thead>
           <tbody>
             {sorted.length === 0 && (
-              <tr><td colSpan={7} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>Nenhuma movimentação registrada nesta filial ainda.</td></tr>
+              <tr><td colSpan={8} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>
+                {movements.length === 0
+                  ? "Nenhuma movimentação registrada nesta filial ainda."
+                  : "Nenhuma movimentação encontrada com esses filtros."}
+              </td></tr>
             )}
             {sorted.map((m) => {
               const p = productMap[m.productId];
@@ -2269,6 +2567,9 @@ function MovimentacoesTab({ products, movements, onEntrada, onSaida, onImportar,
               return (
                 <tr key={m.id}>
                   <td className="est-mono" style={{ color: TOKENS.inkLight }}>{fmtDate(m.date)}</td>
+                  <td className="est-mono" style={{ color: m.purchaseDate ? TOKENS.charcoal : TOKENS.inkLight }}>
+                    {fmtPurchaseDate(m.purchaseDate)}
+                  </td>
                   <td>
                     <span className="est-stamp" style={{
                       background: isIn ? `${TOKENS.teal}18` : `${TOKENS.rust}18`,
@@ -2553,6 +2854,7 @@ function MovementModal({ type, products, onSave, onClose }) {
   const [unitType, setUnitType] = useState(products[0]?.unit || "UN");
   const [factor, setFactor] = useState("");
   const [source, setSource] = useState("");
+  const [purchaseDate, setPurchaseDate] = useState("");
   const [note, setNote] = useState("");
   const isIn = type === "entrada";
   const selected = products.find((p) => p.id === productId);
@@ -2582,7 +2884,7 @@ function MovementModal({ type, products, onSave, onClose }) {
       ...(needsFactor
         ? { packageUnit: unitType, packageQty: Number(quantity), unitsPerPackage: Number(factor) }
         : {}),
-      ...(isIn ? { source } : {}),
+      ...(isIn ? { source, purchaseDate: purchaseDate || null } : {}),
     });
   }
 
@@ -2620,6 +2922,21 @@ function MovementModal({ type, products, onSave, onClose }) {
               </select>
             </Field>
           )}
+          {isIn && (
+            <Field label="Data da compra (opcional)">
+              <input
+                className="est-input"
+                style={{ width: "100%" }}
+                type="date"
+                max={todayISODate()}
+                value={purchaseDate}
+                onChange={(e) => setPurchaseDate(e.target.value)}
+              />
+              <div style={{ fontSize: 11, color: TOKENS.inkLight, marginTop: 4 }}>
+                Use a data da nota fiscal quando o material entrar no estoque em dia diferente do da compra.
+              </div>
+            </Field>
+          )}
           {selected && !isIn && totalQty > selected.quantity && (
             <div style={{ fontSize: 12, color: TOKENS.rustDark, background: `${TOKENS.rust}12`, padding: "6px 10px", borderRadius: 6 }}>
               Estoque atual: {selected.quantity} {selected.unit}. A saída deixará o saldo ajustado para zero.
@@ -2646,6 +2963,7 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
   const [type, setType] = useState(movement.type);
   const [quantity, setQuantity] = useState(movement.quantity);
   const [source, setSource] = useState(movement.source || "");
+  const [purchaseDate, setPurchaseDate] = useState(movement.purchaseDate || "");
   const [note, setNote] = useState(movement.note || "");
   const isIn = type === "entrada";
   const selected = cityProducts.find((p) => p.id === productId);
@@ -2659,7 +2977,7 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
       type,
       quantity: Number(quantity),
       note,
-      ...(isIn && !isTransfer ? { source } : {}),
+      ...(isIn && !isTransfer ? { source, purchaseDate: purchaseDate || null } : {}),
     });
   }
 
@@ -2715,6 +3033,18 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
                 <option value="local">Comprado localmente</option>
                 <option value="matriz">Veio da matriz (Umuarama)</option>
               </select>
+            </Field>
+          )}
+          {isIn && !isTransfer && (
+            <Field label="Data da compra (opcional)">
+              <input
+                className="est-input"
+                style={{ width: "100%" }}
+                type="date"
+                max={todayISODate()}
+                value={purchaseDate}
+                onChange={(e) => setPurchaseDate(e.target.value)}
+              />
             </Field>
           )}
           <Field label="Observação">
