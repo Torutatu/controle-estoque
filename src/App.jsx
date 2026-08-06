@@ -32,6 +32,8 @@ const CHANGELOG = [
   {
     date: "05/08/2026",
     added: [
+      "Ao cadastrar um produto novo, dá pra criar ele em várias filiais de uma vez (ou em todas). Cada filial fica com seu próprio estoque — as outras nascem zeradas, a quantidade digitada vale só para a filial escolhida.",
+      "Ao editar nome, SKU, setor ou unidade de um produto que existe em outras filiais, o app oferece aplicar a correção em todas elas. Estoque, mínimo e preço de cada filial nunca são alterados.",
       "Valor da compra ao registrar uma entrada: informe o valor total da nota ou o preço por unidade — o outro é calculado sozinho. Opcionalmente atualiza o preço do produto no cadastro (vem marcado, desmarque em compras atípicas).",
       "Coluna \"Valor\" na tabela e na impressão de Movimentações, com total no rodapé da folha.",
       "Card \"Gasto em compras no mês\" no painel de Relatórios.",
@@ -661,14 +663,48 @@ export default function ControleEstoque() {
     downloadTextFile(`backup-estoque-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(payload, null, 2));
   }
 
-  function saveProduct(p) {
+  // options.extraCities  -> ao criar, replica o cadastro nessas filiais
+  // options.propagateTo  -> ao editar, ids de produtos irmãos que recebem os
+  //                         mesmos campos de catálogo
+  function saveProduct(p, options = {}) {
     const now = new Date().toISOString();
+    const { extraCities = [], propagateTo = [] } = options;
+
     if (p.id) {
       const stamped = { ...p, updatedBy: userName, updatedAt: now };
-      persist(products.map((x) => (x.id === p.id ? stamped : x)), movements);
+      const propagateSet = new Set(propagateTo);
+      const nextProducts = products.map((x) => {
+        if (x.id === p.id) return stamped;
+        if (!propagateSet.has(x.id)) return x;
+        // Só o catálogo viaja entre filiais. Estoque, mínimo, preço, pedido
+        // e a própria cidade continuam sendo de cada uma.
+        return {
+          ...x,
+          name: p.name,
+          sku: p.sku,
+          category: p.category,
+          unit: p.unit,
+          updatedBy: userName,
+          updatedAt: now,
+        };
+      });
+      persist(nextProducts, movements);
     } else {
-      const newP = { ...p, id: uid(), createdBy: userName, createdAt: now, updatedBy: userName, updatedAt: now };
-      persist([newP, ...products], movements);
+      const base = { ...p, id: uid(), createdBy: userName, createdAt: now, updatedBy: userName, updatedAt: now };
+      // Nas filiais extras o item nasce zerado: a quantidade e o preço
+      // digitados valem só para a filial onde ele está sendo cadastrado.
+      const replicas = extraCities
+        .filter((c) => c !== p.city)
+        .map((c) => ({
+          ...base,
+          id: uid(),
+          city: c,
+          quantity: 0,
+          minStock: 5,
+          unitPrice: 0,
+          orderQty: 0,
+        }));
+      persist([base, ...replicas, ...products], movements);
     }
     setProductModal(null);
   }
@@ -2783,6 +2819,12 @@ function ProductModal({ product, defaultCity, allProducts, onSave, onClose }) {
     name: "", sku: "", category: CATEGORIES[0], quantity: 0, minStock: 5, unitPrice: 0, unit: "UN", city: defaultCity,
   });
   const [skuError, setSkuError] = useState("");
+  // Filiais extras onde o produto também será criado (só no cadastro novo).
+  // A filial do próprio formulário nunca entra aqui — ela é sempre criada.
+  const [extraCities, setExtraCities] = useState([]);
+  // Ao editar, quais campos de catálogo mudaram e em quais outras filiais o
+  // mesmo item existe — usado pra oferecer a propagação.
+  const [propagate, setPropagate] = useState(false);
   // Guarda o último SKU sugerido automaticamente, pra saber se pode trocar a
   // sugestão quando o setor muda (só troca se o usuário não tiver digitado
   // um SKU próprio por cima).
@@ -2803,7 +2845,34 @@ function ProductModal({ product, defaultCity, allProducts, onSave, onClose }) {
   function update(field, value) {
     setForm((f) => ({ ...f, [field]: value }));
     if (field === "sku") setSkuError("");
+    // Se trocar a filial do formulário, ela sai da lista de filiais extras
+    // pra não tentar criar o produto duas vezes na mesma cidade.
+    if (field === "city") setExtraCities((prev) => prev.filter((c) => c !== value));
   }
+
+  function toggleCity(c) {
+    setExtraCities((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
+  }
+
+  const otherCities = CITIES.filter((c) => c !== form.city);
+  const allSelected = otherCities.length > 0 && otherCities.every((c) => extraCities.includes(c));
+
+  // Ao editar: irmãos do mesmo item (mesmo SKU + mesmo nome) em outras filiais.
+  const siblings = isEdit
+    ? (allProducts || []).filter(
+        (p) =>
+          p.id !== form.id &&
+          normalizeSku(p.sku) === normalizeSku(product.sku) &&
+          p.name.trim().toLowerCase() === product.name.trim().toLowerCase()
+      )
+    : [];
+  // Só campos de catálogo — estoque, mínimo e preço nunca são propagados.
+  const catalogChanged =
+    isEdit &&
+    (form.name.trim() !== product.name.trim() ||
+      normalizeSku(form.sku) !== normalizeSku(product.sku) ||
+      form.category !== product.category ||
+      form.unit !== product.unit);
 
   function submit(e) {
     e.preventDefault();
@@ -2824,7 +2893,13 @@ function ProductModal({ product, defaultCity, allProducts, onSave, onClose }) {
       return;
     }
 
-    onSave({ ...form, quantity: Number(form.quantity), minStock: Number(form.minStock), unitPrice: Number(form.unitPrice) });
+    onSave(
+      { ...form, quantity: Number(form.quantity), minStock: Number(form.minStock), unitPrice: Number(form.unitPrice) },
+      {
+        extraCities: isEdit ? [] : extraCities,
+        propagateTo: isEdit && propagate && catalogChanged ? siblings.map((s) => s.id) : [],
+      }
+    );
   }
   return (
     <div className="est-modal-overlay" onClick={onClose}>
@@ -2856,6 +2931,63 @@ function ProductModal({ product, defaultCity, allProducts, onSave, onClose }) {
               {CITIES.map((c) => <option key={c}>{c}</option>)}
             </select>
           </Field>
+
+          {!isEdit && (
+            <div style={{ border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 12, color: TOKENS.inkLight, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                  Criar também em outras filiais
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setExtraCities(allSelected ? [] : otherCities)}
+                  className="est-mono"
+                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: TOKENS.teal, textDecoration: "underline" }}
+                >
+                  {allSelected ? "limpar" : "todas"}
+                </button>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {otherCities.map((c) => {
+                  const on = extraCities.includes(c);
+                  return (
+                    <label
+                      key={c}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+                        fontSize: 12, padding: "5px 10px", borderRadius: 20,
+                        border: `1px solid ${on ? TOKENS.teal : TOKENS.line}`,
+                        background: on ? `${TOKENS.teal}14` : "transparent",
+                        color: on ? TOKENS.tealDark : TOKENS.inkLight,
+                      }}
+                    >
+                      <input type="checkbox" checked={on} onChange={() => toggleCity(c)} style={{ margin: 0 }} />
+                      {c}
+                    </label>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 11, color: TOKENS.inkLight, marginTop: 8 }}>
+                {extraCities.length === 0
+                  ? `O produto será criado só em ${form.city}.`
+                  : `Será criado em ${form.city} + ${extraCities.length} filial${extraCities.length > 1 ? "is" : ""}. Nas outras entra com estoque zerado e mínimo padrão — a quantidade e o preço abaixo valem só para ${form.city}.`}
+              </div>
+            </div>
+          )}
+
+          {isEdit && catalogChanged && siblings.length > 0 && (
+            <div style={{ border: `1px solid ${TOKENS.amber}66`, background: `${TOKENS.amber}14`, borderRadius: 8, padding: 12 }}>
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+                <input type="checkbox" checked={propagate} onChange={(e) => setPropagate(e.target.checked)} style={{ marginTop: 2 }} />
+                <span style={{ fontSize: 12, color: TOKENS.charcoal }}>
+                  Aplicar também em <strong>{siblings.map((s) => s.city).join(", ")}</strong>, onde esse item também existe.
+                  <div style={{ color: TOKENS.inkLight, marginTop: 4 }}>
+                    Só nome, SKU, setor e unidade. Estoque, mínimo e preço de cada filial não são alterados.
+                  </div>
+                </span>
+              </label>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 10 }}>
             <Field label="Quantidade" style={{ flex: 1 }}>
               <input className="est-input" style={{ width: "100%" }} type="number" min="0" value={form.quantity} onChange={(e) => update("quantity", e.target.value)} />
