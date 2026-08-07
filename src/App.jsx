@@ -32,6 +32,7 @@ const CHANGELOG = [
   {
     date: "05/08/2026",
     added: [
+      "Botão \"Imprimir tudo\" em Pedidos: gera um documento único com os itens da Matriz primeiro e os de compra local depois, sem quebra de página entre eles — ocupa o mínimo de folhas. O \"PDF (Matriz)\" continua disponível para enviar só o pedido da matriz.",
       "Ao cadastrar um produto novo, dá pra criar ele em várias filiais de uma vez (ou em todas). Cada filial fica com seu próprio estoque — as outras nascem zeradas, a quantidade digitada vale só para a filial escolhida.",
       "Ao editar nome, SKU, setor ou unidade de um produto que existe em outras filiais, o app oferece aplicar a correção em todas elas. Estoque, mínimo e preço de cada filial nunca são alterados.",
       "Valor da compra ao registrar uma entrada: informe o valor total da nota ou o preço por unidade — o outro é calculado sozinho. Opcionalmente atualiza o preço do produto no cadastro (vem marcado, desmarque em compras atípicas).",
@@ -1563,64 +1564,112 @@ function MovimentacoesPrintSheet({ target }) {
   );
 }
 
+// Monta os grupos por setor (ordem fixa de CATEGORIES, nome A-Z dentro de
+// cada um) de uma lista de itens já filtrada.
+function groupOrderItemsByCategory(items) {
+  const groups = CATEGORIES.map((cat) => ({
+    category: cat,
+    items: items.filter((p) => p.category === cat).sort((a, b) => a.name.localeCompare(b.name, "pt-BR")),
+  })).filter((g) => g.items.length > 0);
+  const otherItems = items
+    .filter((p) => !CATEGORIES.includes(p.category))
+    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+  if (otherItems.length > 0) groups.push({ category: "Outros", items: otherItems });
+  return groups;
+}
+
+// Bloco de uma origem (matriz ou local) dentro de uma filial. Layout idêntico
+// ao que já existia — só foi extraído pra poder aparecer duas vezes no mesmo
+// documento.
+function OrderSourceBlock({ items, showSourceHeading, sourceLabel }) {
+  if (items.length === 0) return null;
+  const total = items.reduce((s, p) => s + (Number(p.orderQty) || 0), 0);
+  const groups = groupOrderItemsByCategory(items);
+  return (
+    <div style={{ marginBottom: 12 }}>
+      {showSourceHeading && (
+        <div
+          className="ps-category-heading"
+          style={{
+            fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 12,
+            textTransform: "uppercase", letterSpacing: "0.06em", margin: "10px 0 2px",
+            paddingBottom: 2, borderBottom: "1px solid #1a1a1a",
+          }}
+        >
+          {sourceLabel}
+        </div>
+      )}
+      {groups.map((g) => (
+        <div key={g.category} style={{ marginBottom: 10 }}>
+          <div className="ps-category-heading" style={{ fontSize: 11, fontWeight: 700, color: "#555", textTransform: "uppercase", letterSpacing: "0.04em", margin: "8px 0 4px" }}>
+            {g.category}
+          </div>
+          <table className="ps-table">
+            <thead>
+              <tr><th>SKU</th><th>Produto</th><th style={{ textAlign: "right" }}>Qtd.</th><th>Un.</th><th>Equivalente</th></tr>
+            </thead>
+            <tbody>
+              {g.items.map((p) => (
+                <tr key={p.id}>
+                  <td>{p.sku}</td>
+                  <td>{p.name}</td>
+                  <td style={{ textAlign: "right" }}>{p.orderPackageUnit ? p.orderPackageQty : p.orderQty}</td>
+                  <td>{p.orderPackageUnit || p.unit}</td>
+                  <td>{p.orderPackageUnit ? `${p.orderQty} ${p.unit}` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+      <div style={{ fontSize: 12, textAlign: "right", color: "#333" }}>
+        {items.length} itens · {total} unidades no total
+      </div>
+    </div>
+  );
+}
+
 function PedidoPrintSheet({ products, target }) {
   const targetCity = target.city;
   const source = target.source || "matriz";
+  // "ambos" imprime matriz e local no mesmo documento, nessa ordem, sem
+  // quebra de página entre eles — pra ocupar o mínimo de folhas.
+  const isBoth = source === "ambos";
   const cities = targetCity === "all" ? CITIES : [targetCity];
   const dateStr = new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
+
+  const title = isBoth ? "Pedido de compra" : source === "local" ? "Compra local" : "Pedido de compra";
+  const subtitleExtra = isBoth
+    ? " · matriz e compra local"
+    : source === "local"
+    ? " · itens de compra local (não enviar à matriz)"
+    : "";
+
+  const pick = (c, src) =>
+    products.filter(
+      (p) => p.city === c && (Number(p.orderQty) || 0) > 0 && (p.orderSource || "matriz") === src
+    );
+
   return (
     <PrintShell
-      title={source === "local" ? "Compra local" : "Pedido de compra"}
-      subtitle={`${targetCity === "all" ? "Todas as filiais" : targetCity} · gerado em ${dateStr}${source === "local" ? " · itens de compra local (não enviar à matriz)" : ""}`}
+      title={title}
+      subtitle={`${targetCity === "all" ? "Todas as filiais" : targetCity} · gerado em ${dateStr}${subtitleExtra}`}
     >
       {cities.map((c) => {
-        const items = products.filter((p) => p.city === c && (Number(p.orderQty) || 0) > 0 && (p.orderSource || "matriz") === source);
-        const total = items.reduce((s, p) => s + (Number(p.orderQty) || 0), 0);
-        // Agrupa por setor (na ordem fixa de CATEGORIES) e ordena por nome
-        // dentro de cada setor — facilita separar os itens fisicamente.
-        const groups = CATEGORIES.map((cat) => ({
-          category: cat,
-          items: items.filter((p) => p.category === cat).sort((a, b) => a.name.localeCompare(b.name, "pt-BR")),
-        })).filter((g) => g.items.length > 0);
-        const otherItems = items
-          .filter((p) => !CATEGORIES.includes(p.category))
-          .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
-        if (otherItems.length > 0) groups.push({ category: "Outros", items: otherItems });
+        const matriz = isBoth || source === "matriz" ? pick(c, "matriz") : [];
+        const local = isBoth || source === "local" ? pick(c, "local") : [];
+        const vazio = matriz.length === 0 && local.length === 0;
 
         return (
-          <div key={c} style={{ marginBottom: 24 }}>
+          <div key={c} style={{ marginBottom: 20 }}>
             <div className="ps-city-heading" style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 14, marginBottom: 6 }}>{c}</div>
-            {items.length === 0 ? (
+            {vazio ? (
               <p style={{ fontSize: 12, color: "#777", marginBottom: 8 }}>Nenhum item com quantidade a pedir definida para esta filial.</p>
             ) : (
-              groups.map((g) => (
-                <div key={g.category} style={{ marginBottom: 10 }}>
-                  <div className="ps-category-heading" style={{ fontSize: 11, fontWeight: 700, color: "#555", textTransform: "uppercase", letterSpacing: "0.04em", margin: "8px 0 4px" }}>
-                    {g.category}
-                  </div>
-                  <table className="ps-table">
-                    <thead>
-                      <tr><th>SKU</th><th>Produto</th><th style={{ textAlign: "right" }}>Qtd.</th><th>Un.</th><th>Equivalente</th></tr>
-                    </thead>
-                    <tbody>
-                      {g.items.map((p) => (
-                        <tr key={p.id}>
-                          <td>{p.sku}</td>
-                          <td>{p.name}</td>
-                          <td style={{ textAlign: "right" }}>{p.orderPackageUnit ? p.orderPackageQty : p.orderQty}</td>
-                          <td>{p.orderPackageUnit || p.unit}</td>
-                          <td>{p.orderPackageUnit ? `${p.orderQty} ${p.unit}` : "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ))
-            )}
-            {items.length > 0 && (
-              <div style={{ fontSize: 12, textAlign: "right", color: "#333" }}>
-                {items.length} itens · {total} unidades no total
-              </div>
+              <>
+                <OrderSourceBlock items={matriz} showSourceHeading={isBoth} sourceLabel="Matriz" />
+                <OrderSourceBlock items={local} showSourceHeading={isBoth} sourceLabel="Compra local" />
+              </>
             )}
           </div>
         );
@@ -1873,12 +1922,24 @@ function PedidosTab({ products, city, onSave, onRequestPrint, onChangeSource, on
               <button type="button" className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal, padding: "6px 10px", fontSize: 12 }} onClick={downloadOrder}>
                 <Download size={12} /> .txt
               </button>
-              <button type="button" className="est-btn" style={{ background: TOKENS.ink, color: "#fff", padding: "6px 10px", fontSize: 12 }} onClick={() => generatePdf("matriz")}>
-                <FileText size={12} /> PDF (Matriz)
+              <button
+                type="button"
+                className="est-btn"
+                style={{ background: TOKENS.ink, color: "#fff", padding: "6px 10px", fontSize: 12 }}
+                onClick={() => generatePdf(localCount > 0 ? "ambos" : "matriz")}
+                title={localCount > 0 ? "Um documento só: primeiro os itens da Matriz, depois os de compra local" : "Imprimir o pedido da matriz"}
+              >
+                <Printer size={12} /> Imprimir tudo
               </button>
               {localCount > 0 && (
-                <button type="button" className="est-btn" style={{ background: TOKENS.amber, color: TOKENS.ink, padding: "6px 10px", fontSize: 12 }} onClick={() => generatePdf("local")}>
-                  <FileText size={12} /> PDF (Local)
+                <button
+                  type="button"
+                  className="est-btn"
+                  style={{ background: TOKENS.paperDark, color: TOKENS.charcoal, padding: "6px 10px", fontSize: 12 }}
+                  onClick={() => generatePdf("matriz")}
+                  title="Só os itens da Matriz — é o que vai pra Umuarama"
+                >
+                  <FileText size={12} /> PDF (Matriz)
                 </button>
               )}
             </div>
