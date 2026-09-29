@@ -30,6 +30,14 @@ const UNITS = ["UN", "CX", "PCT", "FARDO"];
 // recente primeiro.
 const CHANGELOG = [
   {
+    date: "29/09/2026",
+    added: [
+      "Aba \"Consumo\": mostra, por produto, o Consumo Médio Mensal (CMM) — a média das saídas dos meses já fechados desde a primeira movimentação registrada, seguindo a métrica padrão usada em controle de estoque. Também traz o estoque estimado em dias, com base nesse consumo. Clique numa linha da tabela para abrir o histórico mês a mês (entradas, saídas e saldo final de cada mês).",
+      "Botão \"Mostrar mais\" na aba Movimentações: agora dá pra ver o histórico completo de uma filial rolando a tela, além de já poder buscar por um produto específico.",
+    ],
+    fixed: [],
+  },
+  {
     date: "05/08/2026",
     added: [
       "Botão \"Imprimir tudo\" em Pedidos: gera um documento único com os itens da Matriz primeiro e os de compra local depois, sem quebra de página entre eles — ocupa o mínimo de folhas. O \"PDF (Matriz)\" continua disponível para enviar só o pedido da matriz.",
@@ -283,6 +291,89 @@ function fmtDateTime(iso) {
 }
 function uid() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+// --- Consumo médio mensal (CMM) -------------------------------------------
+// Chave "AAAA-MM" a partir de uma data ISO, e o texto "mmm/AA" pra exibir.
+function monthKey(iso) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+function monthLabel(key) {
+  const [y, m] = key.split("-").map(Number);
+  const d = new Date(y, m - 1, 1);
+  return d.toLocaleDateString("pt-BR", { month: "short", year: "2-digit" }).replace(".", "");
+}
+// Lista de meses (chaves "AAAA-MM") entre from e to, inclusive.
+function monthRange(fromKey, toKey) {
+  const [fy, fm] = fromKey.split("-").map(Number);
+  const [ty, tm] = toKey.split("-").map(Number);
+  const months = [];
+  let y = fy, m = fm;
+  while (y < ty || (y === ty && m <= tm)) {
+    months.push(`${y}-${String(m).padStart(2, "0")}`);
+    m++;
+    if (m > 12) { m = 1; y++; }
+  }
+  return months;
+}
+
+// Monta, para um produto, a tabela mês a mês (entradas/saídas/saldo final)
+// desde a primeira movimentação registrada até o mês atual, e a partir dela
+// calcula o Consumo Médio Mensal (CMM) — métrica padrão de controle de
+// estoque: soma das saídas dos meses **completos** dividida pela quantidade
+// desses meses. O mês em andamento entra na tabela (pra acompanhar o
+// consumo parcial) mas não entra na média, porque ainda não terminou e
+// puxaria o número artificialmente para baixo.
+//
+// O saldo final de cada mês é reconstruído de trás para frente a partir do
+// estoque atual (fonte confiável), desfazendo as movimentações mês a mês —
+// assim o resultado bate com o estoque real mesmo que o produto tenha tido
+// uma quantidade inicial que nunca passou por uma movimentação.
+function buildConsumoMensal(product, movements) {
+  const now = new Date();
+  const currentKey = monthKey(now.toISOString());
+  const productMoves = movements.filter((m) => m.productId === product.id);
+
+  if (productMoves.length === 0) {
+    return {
+      months: [{ key: currentKey, entradas: 0, saidas: 0, saldo: product.quantity, isCurrent: true }],
+      cmm: null,
+      completeMonths: 0,
+    };
+  }
+
+  const firstKey = productMoves.reduce((min, m) => {
+    const k = monthKey(m.date);
+    return k < min ? k : min;
+  }, currentKey);
+
+  const keys = monthRange(firstKey, currentKey);
+  const byMonth = Object.fromEntries(keys.map((k) => [k, { entradas: 0, saidas: 0 }]));
+  for (const m of productMoves) {
+    const k = monthKey(m.date);
+    if (!byMonth[k]) continue; // segurança, não deveria ocorrer
+    if (m.type === "entrada") byMonth[k].entradas += Number(m.quantity) || 0;
+    else byMonth[k].saidas += Number(m.quantity) || 0;
+  }
+
+  // Reconstrói o saldo final de cada mês, de trás para frente, a partir do
+  // estoque atual real.
+  const months = [];
+  let saldoEnd = product.quantity;
+  for (let i = keys.length - 1; i >= 0; i--) {
+    const k = keys[i];
+    const { entradas, saidas } = byMonth[k];
+    months.unshift({ key: k, entradas, saidas, saldo: saldoEnd, isCurrent: k === currentKey });
+    saldoEnd = saldoEnd - entradas + saidas; // saldo final do mês anterior
+  }
+
+  const completeMonths = months.filter((mo) => !mo.isCurrent);
+  const cmm = completeMonths.length > 0
+    ? completeMonths.reduce((s, mo) => s + mo.saidas, 0) / completeMonths.length
+    : null;
+
+  return { months, cmm, completeMonths: completeMonths.length };
 }
 
 function normalizeSku(sku) {
@@ -1202,6 +1293,7 @@ export default function ControleEstoque() {
           { key: "movimentacoes", label: "Movimentações", icon: ClipboardList, color: TOKENS.rust },
           { key: "pedidos", label: "Pedidos", icon: ShoppingCart, color: TOKENS.inkLight },
           { key: "transferencias", label: "Transferência", icon: ArrowLeftRight, color: TOKENS.rustDark },
+          { key: "consumo", label: "Consumo", icon: TrendingUp, color: TOKENS.tealDark },
           { key: "relatorios", label: "Relatórios", icon: FileBarChart, color: TOKENS.purple },
         ].map((t) => {
           const Icon = t.icon;
@@ -1283,6 +1375,10 @@ export default function ControleEstoque() {
                 onEditMovement={(m) => setMoveEditModal(m)}
                 onDeleteMovement={(m) => setConfirmDeleteMovement(m)}
               />
+            )}
+
+            {tab === "consumo" && (
+              <ConsumoTab products={cityProducts} movements={cityMovements} />
             )}
 
             {tab === "relatorios" && (
@@ -2598,7 +2694,12 @@ function MovimentacoesTab({ products, movements, city, onEntrada, onSaida, onImp
       .sort((a, b) => new Date(b.date) - new Date(a.date));
   }, [movements, typeFilter, moveSearch, products]);
 
-  const sorted = filtered.slice(0, MOVIMENTACOES_LIMIT);
+  // A tela começa mostrando só as MOVIMENTACOES_LIMIT mais recentes (pra não
+  // travar com filiais com muito histórico), mas dá pra ir carregando mais
+  // sem precisar filtrar por um produto específico pra ver o resto.
+  const [visibleCount, setVisibleCount] = useState(MOVIMENTACOES_LIMIT);
+  useEffect(() => { setVisibleCount(MOVIMENTACOES_LIMIT); }, [typeFilter, moveSearch, city]);
+  const sorted = filtered.slice(0, visibleCount);
   const hasFilter = typeFilter !== "todos" || moveSearch.trim() !== "";
 
   function handlePrint() {
@@ -2692,7 +2793,7 @@ function MovimentacoesTab({ products, movements, city, onEntrada, onSaida, onImp
         )}
         <div className="est-mono" style={{ fontSize: 11, color: TOKENS.inkLight, marginLeft: "auto" }}>
           {filtered.length} movimentaç{filtered.length === 1 ? "ão" : "ões"}
-          {filtered.length > MOVIMENTACOES_LIMIT ? ` · exibindo as ${MOVIMENTACOES_LIMIT} mais recentes` : ""}
+          {filtered.length > visibleCount ? ` · exibindo as ${visibleCount} mais recentes` : ""}
         </div>
       </div>
 
@@ -2772,6 +2873,165 @@ function MovimentacoesTab({ products, movements, city, onEntrada, onSaida, onImp
             })}
           </tbody>
         </table>
+      </div>
+
+      {filtered.length > visibleCount && (
+        <div style={{ display: "flex", justifyContent: "center", marginTop: 14 }}>
+          <button
+            type="button"
+            className="est-btn"
+            style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }}
+            onClick={() => setVisibleCount((v) => v + MOVIMENTACOES_LIMIT)}
+          >
+            Mostrar mais {Math.min(MOVIMENTACOES_LIMIT, filtered.length - visibleCount)}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const CONSUMO_COLUMNS = [
+  { key: "name", label: "Produto", type: "text" },
+  { key: "category", label: "Setor", type: "text" },
+  { key: "quantity", label: "Estoque atual", type: "number" },
+  { key: "cmm", label: "Consumo médio/mês", type: "number" },
+  { key: "currentMonthSaida", label: "Saída no mês (parcial)", type: "number" },
+  { key: "daysLeft", label: "Estoque estimado", type: "number" },
+];
+
+function ConsumoTab({ products, movements }) {
+  const [sort, setSort] = useState({ key: "cmm", dir: "desc" });
+  const [detail, setDetail] = useState(null);
+
+  // Pra cada produto, monta a tabela mês a mês e o CMM (ver buildConsumoMensal).
+  // Isso olha o histórico completo de movimentações da filial, não só as
+  // últimas 60 que aparecem na tela de Movimentações.
+  const rows = useMemo(() => {
+    return products.map((p) => {
+      const { months, cmm, completeMonths } = buildConsumoMensal(p, movements);
+      const current = months.find((m) => m.isCurrent);
+      const daysLeft = cmm && cmm > 0 ? (p.quantity / cmm) * 30.4 : null;
+      return { product: p, months, cmm, completeMonths, currentMonthSaida: current ? current.saidas : 0, daysLeft };
+    });
+  }, [products, movements]);
+
+  function toggleSort(key) {
+    setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  }
+
+  const sortedRows = useMemo(() => {
+    const mult = sort.dir === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      if (sort.key === "name" || sort.key === "category") {
+        return String(a.product[sort.key] || "").localeCompare(String(b.product[sort.key] || ""), "pt-BR") * mult;
+      }
+      let va, vb;
+      if (sort.key === "quantity") { va = a.product.quantity; vb = b.product.quantity; }
+      else if (sort.key === "cmm") { va = a.cmm ?? -1; vb = b.cmm ?? -1; }
+      else if (sort.key === "currentMonthSaida") { va = a.currentMonthSaida; vb = b.currentMonthSaida; }
+      else { va = a.daysLeft ?? Infinity; vb = b.daysLeft ?? Infinity; }
+      return ((Number(va) || 0) - (Number(vb) || 0)) * mult;
+    });
+  }, [rows, sort]);
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: `${TOKENS.teal}14`, border: `1px solid ${TOKENS.teal}44`, borderRadius: 8, padding: "10px 14px", marginBottom: 16 }}>
+        <TrendingUp size={16} color={TOKENS.tealDark} style={{ flexShrink: 0, marginTop: 1 }} />
+        <div style={{ fontSize: 12, color: TOKENS.tealDark }}>
+          <strong>Consumo médio mensal (CMM)</strong>: média das saídas dos meses já <em>fechados</em> desde a primeira movimentação do produto. O mês em andamento aparece separado (não entra na média, porque ainda não terminou). Clique numa linha para ver o histórico mês a mês.
+        </div>
+      </div>
+
+      <div style={{ overflowX: "auto" }}>
+        <table className="est-table">
+          <thead>
+            <tr>
+              {CONSUMO_COLUMNS.map((col) => {
+                const active = sort.key === col.key;
+                const Icon = active ? (sort.dir === "asc" ? ChevronUp : ChevronDown) : ChevronsUpDown;
+                return (
+                  <th key={col.key} onClick={() => toggleSort(col.key)} style={{ cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" }} title="Clique para ordenar">
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                      {col.label}
+                      <Icon size={12} color={active ? TOKENS.ink : TOKENS.line} />
+                    </span>
+                  </th>
+                );
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {sortedRows.length === 0 && (
+              <tr><td colSpan={6} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>Nenhum produto nesta filial.</td></tr>
+            )}
+            {sortedRows.map((row) => {
+              const p = row.product;
+              const st = CAT_STYLE[p.category] || { color: TOKENS.ink, dark: TOKENS.ink };
+              return (
+                <tr key={p.id} onClick={() => setDetail(row)} style={{ cursor: "pointer" }} title="Ver histórico mês a mês">
+                  <td style={{ fontWeight: 500 }}>{p.name}</td>
+                  <td><span className="est-stamp" style={{ background: `${st.color}18`, color: st.dark, transform: "none" }}>{p.category}</span></td>
+                  <td className="est-mono">{p.quantity} {p.unit}</td>
+                  <td className="est-mono">
+                    {row.cmm !== null ? `${row.cmm.toFixed(1)} ${p.unit}/mês` : <span style={{ color: TOKENS.inkLight }}>dados insuficientes</span>}
+                  </td>
+                  <td className="est-mono" style={{ color: TOKENS.inkLight }}>{row.currentMonthSaida} {p.unit}</td>
+                  <td className="est-mono">
+                    {row.daysLeft !== null ? `~${Math.round(row.daysLeft)} dias` : <span style={{ color: TOKENS.inkLight }}>—</span>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {detail && <ConsumoDetailModal row={detail} onClose={() => setDetail(null)} />}
+    </div>
+  );
+}
+
+function ConsumoDetailModal({ row, onClose }) {
+  const { product, months, cmm, completeMonths } = row;
+  return (
+    <div className="est-modal-overlay" onClick={onClose}>
+      <div className="est-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 480 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+            <TrendingUp size={16} color={TOKENS.tealDark} /> {product.name}
+          </div>
+          <button type="button" onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+        </div>
+
+        <div style={{ overflowX: "auto", maxHeight: "50vh", overflowY: "auto" }}>
+          <table className="est-table">
+            <thead>
+              <tr><th>Mês</th><th>Entradas</th><th>Saídas</th><th>Saldo final</th></tr>
+            </thead>
+            <tbody>
+              {months.map((mo) => (
+                <tr key={mo.key}>
+                  <td style={{ fontWeight: mo.isCurrent ? 600 : 400 }}>
+                    {monthLabel(mo.key)}{mo.isCurrent ? " (em andamento)" : ""}
+                  </td>
+                  <td className="est-mono" style={{ color: TOKENS.tealDark }}>{mo.entradas}</td>
+                  <td className="est-mono" style={{ color: TOKENS.rustDark }}>{mo.saidas}</td>
+                  <td className="est-mono">{mo.saldo} {product.unit}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p style={{ fontSize: 12, color: TOKENS.inkLight, marginTop: 14, marginBottom: 0 }}>
+          {cmm !== null ? (
+            <>Consumo médio mensal: <strong style={{ color: TOKENS.charcoal }}>{cmm.toFixed(1)} {product.unit}/mês</strong>, calculado com {completeMonths} mês{completeMonths === 1 ? "" : "es"} completo{completeMonths === 1 ? "" : "s"} (sem contar o mês em andamento).</>
+          ) : (
+            "Ainda não há um mês completo de histórico pra calcular a média — volte aqui depois que o mês atual fechar."
+          )}
+        </p>
       </div>
     </div>
   );

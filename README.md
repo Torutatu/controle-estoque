@@ -136,6 +136,14 @@ supabase/
   schema.sql         -> script SQL pra rodar no seu projeto Supabase
 ```
 
+## Consumo médio mensal
+
+A aba **Consumo** calcula, por produto, o CMM (Consumo Médio Mensal) — a média das
+saídas dos meses já fechados desde a primeira movimentação registrada, que é a
+métrica padrão usada em controle de estoque para dimensionar reposição. O mês em
+andamento aparece separado (não entra na média, porque ainda não terminou). Clique
+numa linha para ver o histórico completo mês a mês (entradas, saídas e saldo final).
+
 ## Backup e histórico
 
 - O botão **Backup** no cabeçalho baixa um `.json` com todo o estoque (produtos +

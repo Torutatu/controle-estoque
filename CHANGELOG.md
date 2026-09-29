@@ -2,6 +2,12 @@
 
 Todas as alterações relevantes do projeto **Controle de Estoque** são documentadas aqui.
 
+## [2026-09-29]
+
+### Adicionado
+- Aba "Consumo": calcula, por produto, o Consumo Médio Mensal (CMM) — média das saídas dos meses já fechados desde a primeira movimentação registrada (métrica padrão de controle de estoque), além de uma estimativa de estoque em dias. Clicar numa linha abre o histórico mês a mês (entradas, saídas e saldo final de cada mês, ex.: julho entrou 5/saiu 2, agosto entrou 3/saiu 2, etc.).
+- Botão "Mostrar mais" na aba Movimentações, pra ver o histórico completo de uma filial sem precisar filtrar por um produto específico.
+
 ## [2026-07-11]
 
 ### Adicionado
