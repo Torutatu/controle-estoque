@@ -2,6 +2,12 @@
 
 Todas as alterações relevantes do projeto **Controle de Estoque** são documentadas aqui.
 
+## [2026-10-06]
+
+### Adicionado
+- Aba Consumo: coluna "Transferido p/ outras filiais" — transferências deixam de contar como consumo e ficam fora do consumo médio.
+- Aba Consumo: exportar para planilha (.xlsx, abas "Consumo médio" e "Mês a mês") e imprimir / salvar PDF.
+
 ## [2026-10-05]
 
 ### Adicionado

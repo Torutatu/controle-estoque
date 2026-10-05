@@ -30,6 +30,14 @@ const UNITS = ["UN", "CX", "PCT", "FARDO"];
 // recente primeiro.
 const CHANGELOG = [
   {
+    date: "06/10/2026",
+    added: [
+      "Aba Consumo: coluna \"Transferido p/ outras filiais\" — saídas por transferência deixam de contar como consumo (e ficam fora do consumo médio).",
+      "Aba Consumo: botão \"Planilha\" (.xlsx com resumo e mês a mês) e botão \"Imprimir / PDF\", respeitando a ordenação da tela.",
+    ],
+    fixed: [],
+  },
+  {
     date: "05/10/2026",
     added: [
       "Data editável em qualquer movimentação (campo \"Data da movimentação\" no modal de edição). Em transferências, a data muda nos dois lados juntos.",
@@ -359,7 +367,7 @@ function buildConsumoMensal(product, movements) {
 
   if (productMoves.length === 0) {
     return {
-      months: [{ key: currentKey, entradas: 0, saidas: 0, saldo: product.quantity, isCurrent: true }],
+      months: [{ key: currentKey, entradas: 0, saidas: 0, transf: 0, saldo: product.quantity, isCurrent: true }],
       cmm: null,
       completeMonths: 0,
     };
@@ -371,12 +379,16 @@ function buildConsumoMensal(product, movements) {
   }, currentKey);
 
   const keys = monthRange(firstKey, currentKey);
-  const byMonth = Object.fromEntries(keys.map((k) => [k, { entradas: 0, saidas: 0 }]));
+  // "saidas" = consumo real da filial; "transf" = saídas por transferência
+  // pra outras filiais (têm transferId) — não são consumo e ficam fora do CMM.
+  const byMonth = Object.fromEntries(keys.map((k) => [k, { entradas: 0, saidas: 0, transf: 0 }]));
   for (const m of productMoves) {
     const k = monthKey(m.date);
     if (!byMonth[k]) continue; // segurança, não deveria ocorrer
-    if (m.type === "entrada") byMonth[k].entradas += Number(m.quantity) || 0;
-    else byMonth[k].saidas += Number(m.quantity) || 0;
+    const q = Number(m.quantity) || 0;
+    if (m.type === "entrada") byMonth[k].entradas += q;
+    else if (m.transferId) byMonth[k].transf += q;
+    else byMonth[k].saidas += q;
   }
 
   // Reconstrói o saldo final de cada mês, de trás para frente, a partir do
@@ -385,9 +397,9 @@ function buildConsumoMensal(product, movements) {
   let saldoEnd = product.quantity;
   for (let i = keys.length - 1; i >= 0; i--) {
     const k = keys[i];
-    const { entradas, saidas } = byMonth[k];
-    months.unshift({ key: k, entradas, saidas, saldo: saldoEnd, isCurrent: k === currentKey });
-    saldoEnd = saldoEnd - entradas + saidas; // saldo final do mês anterior
+    const { entradas, saidas, transf } = byMonth[k];
+    months.unshift({ key: k, entradas, saidas, transf, saldo: saldoEnd, isCurrent: k === currentKey });
+    saldoEnd = saldoEnd - entradas + saidas + transf; // saldo final do mês anterior
   }
 
   const completeMonths = months.filter((mo) => !mo.isCurrent);
@@ -1422,7 +1434,7 @@ export default function ControleEstoque() {
             )}
 
             {tab === "consumo" && (
-              <ConsumoTab products={cityProducts} movements={cityMovements} />
+              <ConsumoTab products={cityProducts} movements={cityMovements} city={city} onRequestPrint={setPrintTarget} />
             )}
 
             {tab === "relatorios" && (
@@ -1574,6 +1586,7 @@ function PrintSheet({ products, target }) {
   if (!target) return null;
   if (target.kind === "produtos") return <ProdutosPrintSheet target={target} />;
   if (target.kind === "movimentacoes") return <MovimentacoesPrintSheet target={target} />;
+  if (target.kind === "consumo") return <ConsumoPrintSheet target={target} />;
   return <PedidoPrintSheet products={products} target={target} />;
 }
 
@@ -1635,6 +1648,47 @@ function ProdutosPrintSheet({ target }) {
           * {abaixoMinimo} {abaixoMinimo === 1 ? "item está" : "itens estão"} no mínimo ou abaixo dele.
         </div>
       )}
+    </PrintShell>
+  );
+}
+
+// Consumo médio por produto, na ordem em que está na tela.
+function ConsumoPrintSheet({ target }) {
+  const rows = target.rows || [];
+  const dateStr = new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
+  const fmtNum = (v) => (v === null || v === undefined ? "—" : v.toFixed(1).replace(".", ","));
+
+  return (
+    <PrintShell title="Consumo médio mensal" subtitle={`${target.city} · gerado em ${dateStr}`}>
+      <table className="ps-table">
+        <thead>
+          <tr>
+            <th>Produto</th>
+            <th>Setor</th>
+            <th style={{ textAlign: "right" }}>Estoque</th>
+            <th style={{ textAlign: "right" }}>Consumo médio/mês</th>
+            <th style={{ textAlign: "right" }}>Consumo no mês (parcial)</th>
+            <th style={{ textAlign: "right" }}>Transferido p/ outras filiais</th>
+            <th style={{ textAlign: "right" }}>Estoque estimado</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id}>
+              <td>{r.name}</td>
+              <td>{r.category}</td>
+              <td style={{ textAlign: "right" }}>{r.quantity} {r.unit}</td>
+              <td style={{ textAlign: "right" }}>{r.cmm !== null ? `${fmtNum(r.cmm)} ${r.unit}` : "—"}</td>
+              <td style={{ textAlign: "right" }}>{r.currentMonthSaida} {r.unit}</td>
+              <td style={{ textAlign: "right" }}>{r.transfTotal > 0 ? `${r.transfTotal} ${r.unit}` : "—"}</td>
+              <td style={{ textAlign: "right" }}>{r.daysLeft !== null ? `~${Math.round(r.daysLeft)} dias` : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ fontSize: 11, color: "#555", marginTop: 6 }}>
+        Consumo médio = média do consumo da filial nos meses fechados (transferências para outras filiais e o mês em andamento ficam de fora).
+      </div>
     </PrintShell>
   );
 }
@@ -3005,11 +3059,12 @@ const CONSUMO_COLUMNS = [
   { key: "category", label: "Setor", type: "text" },
   { key: "quantity", label: "Estoque atual", type: "number" },
   { key: "cmm", label: "Consumo médio/mês", type: "number" },
-  { key: "currentMonthSaida", label: "Saída no mês (parcial)", type: "number" },
+  { key: "currentMonthSaida", label: "Consumo no mês (parcial)", type: "number" },
+  { key: "transfTotal", label: "Transferido p/ outras filiais", type: "number" },
   { key: "daysLeft", label: "Estoque estimado", type: "number" },
 ];
 
-function ConsumoTab({ products, movements }) {
+function ConsumoTab({ products, movements, city, onRequestPrint }) {
   const [sort, setSort] = useState({ key: "cmm", dir: "desc" });
   const [detail, setDetail] = useState(null);
 
@@ -3021,7 +3076,8 @@ function ConsumoTab({ products, movements }) {
       const { months, cmm, completeMonths } = buildConsumoMensal(p, movements);
       const current = months.find((m) => m.isCurrent);
       const daysLeft = cmm && cmm > 0 ? (p.quantity / cmm) * 30.4 : null;
-      return { product: p, months, cmm, completeMonths, currentMonthSaida: current ? current.saidas : 0, daysLeft };
+      const transfTotal = months.reduce((s, m) => s + (m.transf || 0), 0);
+      return { product: p, months, cmm, completeMonths, currentMonthSaida: current ? current.saidas : 0, transfTotal, daysLeft };
     });
   }, [products, movements]);
 
@@ -3039,17 +3095,73 @@ function ConsumoTab({ products, movements }) {
       if (sort.key === "quantity") { va = a.product.quantity; vb = b.product.quantity; }
       else if (sort.key === "cmm") { va = a.cmm ?? -1; vb = b.cmm ?? -1; }
       else if (sort.key === "currentMonthSaida") { va = a.currentMonthSaida; vb = b.currentMonthSaida; }
+      else if (sort.key === "transfTotal") { va = a.transfTotal; vb = b.transfTotal; }
       else { va = a.daysLeft ?? Infinity; vb = b.daysLeft ?? Infinity; }
       return ((Number(va) || 0) - (Number(vb) || 0)) * mult;
     });
   }, [rows, sort]);
 
+  // Imprimir / salvar PDF: mesma ordem que está na tela.
+  function handlePrint() {
+    onRequestPrint({
+      kind: "consumo",
+      city,
+      rows: sortedRows.map((r) => ({
+        id: r.product.id, name: r.product.name, category: r.product.category,
+        unit: r.product.unit, quantity: r.product.quantity,
+        cmm: r.cmm, currentMonthSaida: r.currentMonthSaida,
+        transfTotal: r.transfTotal, daysLeft: r.daysLeft,
+      })),
+    });
+  }
+
+  // Planilha .xlsx com duas abas: resumo (igual à tela) e mês a mês.
+  function handleExcel() {
+    const resumo = sortedRows.map((r) => ({
+      Produto: r.product.name,
+      Setor: r.product.category,
+      Unidade: r.product.unit,
+      "Estoque atual": r.product.quantity,
+      "Consumo médio/mês": r.cmm !== null ? Math.round(r.cmm * 10) / 10 : "",
+      "Consumo no mês (parcial)": r.currentMonthSaida,
+      "Transferido p/ outras filiais": r.transfTotal,
+      "Estoque estimado (dias)": r.daysLeft !== null ? Math.round(r.daysLeft) : "",
+    }));
+    const mesAMes = [];
+    sortedRows.forEach((r) => {
+      r.months.forEach((mo) => {
+        mesAMes.push({
+          Produto: r.product.name,
+          Setor: r.product.category,
+          Unidade: r.product.unit,
+          Mês: monthLabel(mo.key) + (mo.isCurrent ? " (em andamento)" : ""),
+          Entradas: mo.entradas,
+          Consumo: mo.saidas,
+          Transferido: mo.transf || 0,
+          "Saldo final": mo.saldo,
+        });
+      });
+    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumo), "Consumo médio");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mesAMes), "Mês a mês");
+    XLSX.writeFile(wb, `consumo-${city}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  }
+
   return (
     <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, justifyContent: "flex-end", flexWrap: "wrap" }}>
+        <button className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={handleExcel} disabled={sortedRows.length === 0} title="Baixar planilha (.xlsx)">
+          <FileSpreadsheet size={14} /> Planilha
+        </button>
+        <button className="est-btn" style={{ background: TOKENS.paperDark, color: TOKENS.charcoal }} onClick={handlePrint} disabled={sortedRows.length === 0} title="Imprimir ou salvar como PDF">
+          <Printer size={14} /> Imprimir / PDF
+        </button>
+      </div>
       <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: `${TOKENS.teal}14`, border: `1px solid ${TOKENS.teal}44`, borderRadius: 8, padding: "10px 14px", marginBottom: 16 }}>
         <TrendingUp size={16} color={TOKENS.tealDark} style={{ flexShrink: 0, marginTop: 1 }} />
         <div style={{ fontSize: 12, color: TOKENS.tealDark }}>
-          <strong>Consumo médio mensal (CMM)</strong>: média das saídas dos meses já <em>fechados</em> desde a primeira movimentação do produto. O mês em andamento aparece separado (não entra na média, porque ainda não terminou). Clique numa linha para ver o histórico mês a mês.
+          <strong>Consumo médio mensal (CMM)</strong>: média do consumo da filial nos meses já <em>fechados</em> desde a primeira movimentação do produto. Saídas por transferência para outras filiais <em>não</em> são consumo: aparecem na coluna própria e ficam fora da média. O mês em andamento aparece separado (não entra na média, porque ainda não terminou). Clique numa linha para ver o histórico mês a mês.
         </div>
       </div>
 
@@ -3073,7 +3185,7 @@ function ConsumoTab({ products, movements }) {
           </thead>
           <tbody>
             {sortedRows.length === 0 && (
-              <tr><td colSpan={6} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>Nenhum produto nesta filial.</td></tr>
+              <tr><td colSpan={7} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>Nenhum produto nesta filial.</td></tr>
             )}
             {sortedRows.map((row) => {
               const p = row.product;
@@ -3087,6 +3199,9 @@ function ConsumoTab({ products, movements }) {
                     {row.cmm !== null ? `${row.cmm.toFixed(1)} ${p.unit}/mês` : <span style={{ color: TOKENS.inkLight }}>dados insuficientes</span>}
                   </td>
                   <td className="est-mono" style={{ color: TOKENS.inkLight }}>{row.currentMonthSaida} {p.unit}</td>
+                  <td className="est-mono" style={{ color: row.transfTotal > 0 ? TOKENS.purple : TOKENS.inkLight }}>
+                    {row.transfTotal > 0 ? `${row.transfTotal} ${p.unit}` : "—"}
+                  </td>
                   <td className="est-mono">
                     {row.daysLeft !== null ? `~${Math.round(row.daysLeft)} dias` : <span style={{ color: TOKENS.inkLight }}>—</span>}
                   </td>
@@ -3117,7 +3232,7 @@ function ConsumoDetailModal({ row, onClose }) {
         <div style={{ overflowX: "auto", maxHeight: "50vh", overflowY: "auto" }}>
           <table className="est-table">
             <thead>
-              <tr><th>Mês</th><th>Entradas</th><th>Saídas</th><th>Saldo final</th></tr>
+              <tr><th>Mês</th><th>Entradas</th><th>Consumo</th><th>Transferido</th><th>Saldo final</th></tr>
             </thead>
             <tbody>
               {months.map((mo) => (
@@ -3127,6 +3242,7 @@ function ConsumoDetailModal({ row, onClose }) {
                   </td>
                   <td className="est-mono" style={{ color: TOKENS.tealDark }}>{mo.entradas}</td>
                   <td className="est-mono" style={{ color: TOKENS.rustDark }}>{mo.saidas}</td>
+                  <td className="est-mono" style={{ color: mo.transf > 0 ? TOKENS.purple : TOKENS.inkLight }}>{mo.transf > 0 ? mo.transf : "—"}</td>
                   <td className="est-mono">{mo.saldo} {product.unit}</td>
                 </tr>
               ))}
