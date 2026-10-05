@@ -2,6 +2,15 @@
 
 Todas as alterações relevantes do projeto **Controle de Estoque** são documentadas aqui.
 
+## [2026-10-05]
+
+### Adicionado
+- Data editável em qualquer movimentação (modal de edição). Em transferências a data muda nos dois lados juntos.
+- Alteração de data em lote na aba Movimentações, com checkboxes e atalho "selecionar todas as saídas do filtro atual".
+
+### Corrigido
+- Editar um produto não é mais bloqueado por "SKU já existe": sem mudança de SKU a validação é ignorada, e cópias do mesmo item em outras filiais não contam como duplicata ao corrigir nome/SKU.
+
 ## [2026-09-29]
 
 ### Adicionado

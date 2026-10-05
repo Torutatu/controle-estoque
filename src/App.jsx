@@ -30,6 +30,16 @@ const UNITS = ["UN", "CX", "PCT", "FARDO"];
 // recente primeiro.
 const CHANGELOG = [
   {
+    date: "05/10/2026",
+    added: [
+      "Data editável em qualquer movimentação (campo \"Data da movimentação\" no modal de edição). Em transferências, a data muda nos dois lados juntos.",
+      "Alteração de data em lote na aba Movimentações: marque várias movimentações (ou use \"selecionar todas as saídas do filtro atual\"), escolha a nova data e clique em \"Alterar data\".",
+    ],
+    fixed: [
+      "Editar um produto não é mais bloqueado por \"SKU já existe\": se o SKU não foi alterado a validação é ignorada, e as cópias do mesmo item em outras filiais não contam mais como duplicata ao corrigir nome ou SKU.",
+    ],
+  },
+  {
     date: "29/09/2026",
     added: [
       "Aba \"Consumo\": mostra, por produto, o Consumo Médio Mensal (CMM) — a média das saídas dos meses já fechados desde a primeira movimentação registrada, seguindo a métrica padrão usada em controle de estoque. Também traz o estoque estimado em dias, com base nesse consumo. Clique numa linha da tabela para abrir o histórico mês a mês (entradas, saídas e saldo final de cada mês).",
@@ -291,6 +301,18 @@ function fmtDateTime(iso) {
 }
 function uid() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+// Data de uma movimentação (ISO) <-> valor de <input type="date"> (AAAA-MM-DD,
+// no fuso local). Ao gravar usa meio-dia local pra o dia nunca "escorregar"
+// por causa de fuso horário.
+function isoToDateInput(iso) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function dateInputToIso(value) {
+  const [y, m, d] = value.split("-").map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0).toISOString();
 }
 
 // --- Consumo médio mensal (CMM) -------------------------------------------
@@ -970,9 +992,10 @@ export default function ControleEstoque() {
         }
         return p;
       });
+      const newDate = updates.date || null;
       const nextMovements = movements.map((m) => {
-        if (m.id === original.id) return { ...m, quantity: newQty, note: updates.note, editedBy: userName, editedAt: new Date().toISOString() };
-        if (m.id === linked.id) return { ...m, quantity: newQty };
+        if (m.id === original.id) return { ...m, quantity: newQty, note: updates.note, ...(newDate ? { date: newDate } : {}), editedBy: userName, editedAt: new Date().toISOString() };
+        if (m.id === linked.id) return { ...m, quantity: newQty, ...(newDate ? { date: newDate } : {}) };
         return m;
       });
       persist(nextProducts, nextMovements);
@@ -1000,6 +1023,7 @@ export default function ControleEstoque() {
               type: updates.type,
               quantity: newQty,
               note: updates.note,
+              ...(updates.date ? { date: updates.date } : {}),
               editedBy: userName,
               editedAt: new Date().toISOString(),
               ...(updates.hasOwnProperty("source") ? { source: updates.source } : {}),
@@ -1017,6 +1041,25 @@ export default function ControleEstoque() {
       persist(nextProducts, nextMovements);
     }
     setMoveEditModal(null);
+  }
+
+  // Altera só a data de várias movimentações de uma vez (não mexe em
+  // estoque). Se alguma for parte de uma transferência, o outro lado dela
+  // acompanha, pra manter a transferência coerente.
+  function changeMovementsDate(ids, dateValue) {
+    if (!ids.length || !dateValue) return;
+    const iso = dateInputToIso(dateValue);
+    const idSet = new Set(ids);
+    const transferIds = new Set(
+      movements.filter((m) => idSet.has(m.id) && m.transferId).map((m) => m.transferId)
+    );
+    const now = new Date().toISOString();
+    const nextMovements = movements.map((m) =>
+      idSet.has(m.id) || (m.transferId && transferIds.has(m.transferId))
+        ? { ...m, date: iso, editedBy: userName, editedAt: now }
+        : m
+    );
+    persist(products, nextMovements);
   }
 
   // Apaga uma movimentação e desfaz o efeito dela no estoque. Se ela for
@@ -1374,6 +1417,7 @@ export default function ControleEstoque() {
                 onImportar={() => setImportModal(true)}
                 onEditMovement={(m) => setMoveEditModal(m)}
                 onDeleteMovement={(m) => setConfirmDeleteMovement(m)}
+                onChangeDates={changeMovementsDate}
               />
             )}
 
@@ -2673,8 +2717,11 @@ function ProdutosTab({ products, allProducts, city, search, setSearch, catFilter
 
 const MOVIMENTACOES_LIMIT = 60;
 
-function MovimentacoesTab({ products, movements, city, onEntrada, onSaida, onImportar, onEditMovement, onDeleteMovement, onRequestPrint }) {
+function MovimentacoesTab({ products, movements, city, onEntrada, onSaida, onImportar, onEditMovement, onDeleteMovement, onRequestPrint, onChangeDates }) {
   const productMap = Object.fromEntries(products.map((p) => [p.id, p]));
+  // Seleção em lote (checkboxes) pra alterar a data de várias de uma vez.
+  const [selected, setSelected] = useState(() => new Set());
+  const [bulkDate, setBulkDate] = useState("");
   const [typeFilter, setTypeFilter] = useState("todos");
   const [moveSearch, setMoveSearch] = useState("");
 
@@ -2701,6 +2748,39 @@ function MovimentacoesTab({ products, movements, city, onEntrada, onSaida, onImp
   useEffect(() => { setVisibleCount(MOVIMENTACOES_LIMIT); }, [typeFilter, moveSearch, city]);
   const sorted = filtered.slice(0, visibleCount);
   const hasFilter = typeFilter !== "todos" || moveSearch.trim() !== "";
+
+  // Só conta como selecionado o que ainda existe na filial (movimentações
+  // apagadas/trocadas de filial saem da seleção sozinhas).
+  const existingIds = new Set(movements.map((m) => m.id));
+  const selectedIds = [...selected].filter((id) => existingIds.has(id));
+  const allVisibleSelected = sorted.length > 0 && sorted.every((m) => selected.has(m.id));
+
+  function toggleOne(id) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function toggleAllVisible() {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) sorted.forEach((m) => next.delete(m.id));
+      else sorted.forEach((m) => next.add(m.id));
+      return next;
+    });
+  }
+  // Atalho: seleciona todas as saídas de todo o filtro atual (não só as
+  // visíveis na tela).
+  function selectAllFilteredSaidas() {
+    setSelected(new Set(filtered.filter((m) => m.type === "saida").map((m) => m.id)));
+  }
+  function applyBulkDate() {
+    if (!bulkDate || selectedIds.length === 0) return;
+    onChangeDates(selectedIds, bulkDate);
+    setSelected(new Set());
+    setBulkDate("");
+  }
 
   function handlePrint() {
     const rows = filtered.map((m) => {
@@ -2797,14 +2877,42 @@ function MovimentacoesTab({ products, movements, city, onEntrada, onSaida, onImp
         </div>
       </div>
 
+      {selectedIds.length > 0 && (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", background: `${TOKENS.purple}14`, border: `1px solid ${TOKENS.purple}44`, borderRadius: 8, padding: "10px 14px", marginBottom: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>
+            {selectedIds.length} selecionada{selectedIds.length > 1 ? "s" : ""}
+          </div>
+          <input
+            className="est-input"
+            type="date"
+            max={todayISODate()}
+            value={bulkDate}
+            onChange={(e) => setBulkDate(e.target.value)}
+          />
+          <button type="button" className="est-btn" style={{ background: TOKENS.purple, color: "#fff" }} onClick={applyBulkDate} disabled={!bulkDate}>
+            Alterar data
+          </button>
+          <button type="button" className="est-mono" onClick={() => setSelected(new Set())} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: TOKENS.inkLight, textDecoration: "underline" }}>
+            limpar seleção
+          </button>
+        </div>
+      )}
+      {filtered.some((m) => m.type === "saida") && (
+        <div style={{ marginBottom: 8 }}>
+          <button type="button" className="est-mono" onClick={selectAllFilteredSaidas} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: TOKENS.teal, textDecoration: "underline", padding: 0 }}>
+            selecionar todas as saídas do filtro atual
+          </button>
+        </div>
+      )}
+
       <div style={{ overflowX: "auto" }}>
         <table className="est-table">
           <thead>
-            <tr><th>Data</th><th>Data compra</th><th>Tipo</th><th>Produto</th><th>Quantidade</th><th>Valor</th><th>Observação</th><th>Por</th><th></th></tr>
+            <tr><th style={{ width: 28 }}><input type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible} title="Selecionar todas as visíveis" /></th><th>Data</th><th>Data compra</th><th>Tipo</th><th>Produto</th><th>Quantidade</th><th>Valor</th><th>Observação</th><th>Por</th><th></th></tr>
           </thead>
           <tbody>
             {sorted.length === 0 && (
-              <tr><td colSpan={9} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>
+              <tr><td colSpan={10} style={{ textAlign: "center", padding: 24, color: TOKENS.inkLight }}>
                 {movements.length === 0
                   ? "Nenhuma movimentação registrada nesta filial ainda."
                   : "Nenhuma movimentação encontrada com esses filtros."}
@@ -2814,7 +2922,8 @@ function MovimentacoesTab({ products, movements, city, onEntrada, onSaida, onImp
               const p = productMap[m.productId];
               const isIn = m.type === "entrada";
               return (
-                <tr key={m.id}>
+                <tr key={m.id} style={selected.has(m.id) ? { background: `${TOKENS.purple}10` } : undefined}>
+                  <td><input type="checkbox" checked={selected.has(m.id)} onChange={() => toggleOne(m.id)} /></td>
                   <td className="est-mono" style={{ color: TOKENS.inkLight }}>{fmtDate(m.date)}</td>
                   <td className="est-mono" style={{ color: m.purchaseDate ? TOKENS.charcoal : TOKENS.inkLight }}>
                     {fmtPurchaseDate(m.purchaseDate)}
@@ -3203,12 +3312,24 @@ function ProductModal({ product, defaultCity, allProducts, onSave, onClose }) {
     // catálogo replicado identifica "o mesmo item" em cada cidade). Só é
     // bloqueado quando é uma colisão de verdade: outro produto com nome
     // diferente usando esse SKU, ou outro produto na MESMA filial.
-    const duplicate = (allProducts || []).find(
-      (p) =>
-        p.id !== form.id &&
-        normalizeSku(p.sku) === normalizeSku(form.sku) &&
-        (p.name.trim().toLowerCase() !== form.name.trim().toLowerCase() || p.city === form.city)
-    );
+    //
+    // Ao editar: (1) se o SKU não foi alterado, não há o que validar — uma
+    // colisão antiga (já avisada no banner da aba Produtos) não pode travar a
+    // edição de outros campos; (2) o próprio produto e seus "irmãos" (mesmo
+    // item em outras filiais, com o nome/SKU originais) nunca contam como
+    // duplicata — senão corrigir um nome ou SKU ficaria bloqueado pelas
+    // cópias que ainda têm o valor antigo.
+    const skuChanged = !isEdit || normalizeSku(form.sku) !== normalizeSku(product.sku);
+    const siblingIds = new Set(siblings.map((s) => s.id));
+    const duplicate = !skuChanged
+      ? null
+      : (allProducts || []).find(
+          (p) =>
+            p.id !== form.id &&
+            !siblingIds.has(p.id) &&
+            normalizeSku(p.sku) === normalizeSku(form.sku) &&
+            (p.name.trim().toLowerCase() !== form.name.trim().toLowerCase() || p.city === form.city)
+        );
     if (duplicate) {
       setSkuError(`Esse SKU já está em uso por "${duplicate.name}" (${duplicate.city}). Escolha outro.`);
       return;
@@ -3591,6 +3712,8 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
   const [source, setSource] = useState(movement.source || "");
   const [purchaseDate, setPurchaseDate] = useState(movement.purchaseDate || "");
   const [note, setNote] = useState(movement.note || "");
+  const originalDate = isoToDateInput(movement.date);
+  const [dateValue, setDateValue] = useState(originalDate);
   const [totalCost, setTotalCost] = useState(movement.totalCost != null ? String(movement.totalCost) : "");
   const [unitCost, setUnitCost] = useState(movement.unitCost != null ? String(movement.unitCost) : "");
   const costDriver = useRef(null);
@@ -3630,6 +3753,8 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
       type,
       quantity: Number(quantity),
       note,
+      // Só manda a data se foi alterada, pra não mexer no horário original.
+      ...(dateValue && dateValue !== originalDate ? { date: dateInputToIso(dateValue) } : {}),
       ...(isIn && !isTransfer
         ? {
             source,
@@ -3734,6 +3859,17 @@ function MovementEditModal({ movement, linkedMovement, products, onSave, onDelet
               )}
             </div>
           )}
+          <Field label="Data da movimentação">
+            <input
+              className="est-input"
+              style={{ width: "100%" }}
+              type="date"
+              max={todayISODate()}
+              value={dateValue}
+              onChange={(e) => setDateValue(e.target.value)}
+              required
+            />
+          </Field>
           <Field label="Observação">
             <input className="est-input" style={{ width: "100%" }} value={note} onChange={(e) => setNote(e.target.value)} />
           </Field>
